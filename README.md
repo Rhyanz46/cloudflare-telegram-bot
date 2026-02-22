@@ -118,6 +118,24 @@ go build -o cf-dns-bot cmd/bot/main.go
 ./cf-dns-bot
 ```
 
+### Run with PM2 (Production)
+
+```bash
+# Build both services
+go build -o cf-dns-bot ./cmd/bot
+go build -o cf-dns-mcp ./cmd/mcp-server
+
+# Start with PM2
+pm2 start ecosystem.config.js
+
+# View logs
+pm2 logs
+
+# Restart
+pm2 restart cf-dns-bot
+pm2 restart cf-dns-mcp
+```
+
 ## How to Use
 
 ### Starting the Bot
@@ -212,6 +230,109 @@ Step 6: Enable Proxy?
 └─────────┴───────────┘
 ```
 
+## MCP Server
+
+This project includes an MCP (Model Context Protocol) server that allows AI assistants like Claude to manage Cloudflare DNS records directly.
+
+### What is MCP?
+
+MCP (Model Context Protocol) is a protocol that enables AI assistants to interact with external tools and services. With MCP, you can ask Claude to manage your DNS records using natural language.
+
+### MCP Server Tools
+
+The MCP server provides 7 tools:
+
+| Tool | Description |
+|------|-------------|
+| `list_zones` | List all Cloudflare zones (domains) |
+| `list_records` | List DNS records for a specific zone |
+| `get_record` | Get details of a specific record |
+| `create_record` | Create a new DNS record |
+| `update_record` | Update an existing DNS record |
+| `delete_record` | Delete a DNS record |
+| `upsert_record` | Create or update a record (idempotent) |
+
+### Running the MCP Server
+
+#### Option 1: Run directly
+```bash
+go run cmd/mcp-server/main.go
+```
+
+#### Option 2: Build and run
+```bash
+go build -o cf-dns-mcp ./cmd/mcp-server
+./cf-dns-mcp
+```
+
+#### Option 3: Run with PM2
+```bash
+pm2 start ecosystem.config.js --only cf-dns-mcp
+```
+
+### Configuring Claude Desktop
+
+To use the MCP server with Claude Desktop, add this to your `claude_desktop_config.json`:
+
+**macOS:**
+```json
+{
+  "mcpServers": {
+    "cf-dns": {
+      "command": "/path/to/cf-dns-mcp",
+      "env": {
+        "CLOUDFLARE_API_TOKEN": "your_cf_api_token"
+      }
+    }
+  }
+}
+```
+
+**Windows:**
+```json
+{
+  "mcpServers": {
+    "cf-dns": {
+      "command": "C:\\path\\to\\cf-dns-mcp.exe",
+      "env": {
+        "CLOUDFLARE_API_TOKEN": "your_cf_api_token"
+      }
+    }
+  }
+}
+```
+
+**Config file location:**
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%/Claude/claude_desktop_config.json`
+- Linux: `~/.config/Claude/claude_desktop_config.json`
+
+### Using MCP with Claude
+
+Once configured, you can ask Claude to manage your DNS:
+
+```
+"List all my Cloudflare zones"
+"Show me DNS records for example.com"
+"Create an A record for www.example.com pointing to 192.168.1.1"
+"Update the TTL of api.example.com to 600"
+"Delete the test.example.com record"
+```
+
+### Example MCP Usage
+
+```bash
+# List all zones
+./cf-dns-mcp
+# Then type: {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_zones","arguments":{}}}
+
+# List records for a zone
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_records","arguments":{"zone_name":"example.com"}}}' | ./cf-dns-mcp
+
+# Create a record
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_record","arguments":{"zone_name":"example.com","name":"www","type":"A","content":"192.168.1.1","ttl":300,"proxied":true}}}' | ./cf-dns-mcp
+```
+
 ## Supported Record Types
 
 | Type | Description | Example Content |
@@ -224,6 +345,157 @@ Step 6: Enable Proxy?
 | NS | Nameserver | `ns1.example.com` |
 | SRV | Service locator | `10 5 5060 sipserver.example.com` |
 | CAA | Certificate Authority | `0 issue "letsencrypt.org"` |
+
+## Tutorial: Step-by-Step Guide
+
+### Tutorial 1: Initial Setup
+
+1. **Get Cloudflare API Token**
+   ```
+   1. Login to https://dash.cloudflare.com
+   2. Go to My Profile → API Tokens
+   3. Click "Create Token"
+   4. Use "Edit zone DNS" template
+   5. Select your zone (domain)
+   6. Copy the token
+   ```
+
+2. **Get Telegram Bot Token**
+   ```
+   1. Open Telegram and search @BotFather
+   2. Send /newbot
+   3. Follow instructions to create bot
+   4. Copy the bot token
+   ```
+
+3. **Get Your Telegram User ID**
+   ```
+   1. Search @userinfobot on Telegram
+   2. Start the bot
+   3. Copy your user ID
+   ```
+
+4. **Configure Environment**
+   ```bash
+   cp .env.example .env
+   # Edit .env and fill in:
+   # TELEGRAM_BOT_TOKEN=your_bot_token
+   # TELEGRAM_ALLOWED_USERS=your_user_id
+   # CLOUDFLARE_API_TOKEN=your_cf_token
+   ```
+
+### Tutorial 2: Create Your First DNS Record
+
+1. **Start the bot**
+   ```bash
+   go run cmd/bot/main.go
+   ```
+
+2. **In Telegram:**
+   ```
+   1. Send /start to your bot
+   2. Click "➕ Create Record"
+   3. Select your zone (domain)
+   4. Select "A" record type
+   5. Type: www
+   6. Type: 192.168.1.1 (your server IP)
+   7. Select TTL: 300
+   8. Select: ✅ Yes (Proxied)
+   9. Click: ✅ Confirm Create
+   ```
+
+3. **Verify the record**
+   ```bash
+   nslookup www.yourdomain.com
+   # Should show Cloudflare IPs (if proxied)
+   ```
+
+### Tutorial 3: Manage Existing Records
+
+1. **List all records**
+   ```
+   1. Send /start
+   2. Click "🔍 Manage Records"
+   3. Select your zone
+   4. Browse records with Prev/Next buttons
+   ```
+
+2. **Edit a record**
+   ```
+   1. Click on any record button
+   2. Click "✏️ Edit"
+   3. Choose what to edit (Content, TTL, or Proxy)
+   4. Enter new value
+   ```
+
+3. **Delete a record**
+   ```
+   1. Click on record
+   2. Click "🗑️ Delete"
+   3. Confirm deletion
+   ```
+
+### Tutorial 4: Using MCP Server with Claude
+
+1. **Build MCP server**
+   ```bash
+   go build -o cf-dns-mcp ./cmd/mcp-server
+   ```
+
+2. **Configure Claude Desktop**
+   ```json
+   {
+     "mcpServers": {
+       "cf-dns": {
+         "command": "/path/to/cf-dns-mcp",
+         "env": {
+           "CLOUDFLARE_API_TOKEN": "your_cf_api_token"
+         }
+       }
+     }
+   }
+   ```
+
+3. **Ask Claude to manage DNS**
+   ```
+   "List all my zones"
+   "Create A record blog.example.com pointing to 192.168.1.1"
+   "Delete test.example.com"
+   ```
+
+### Tutorial 5: Production Deployment
+
+1. **Build binaries**
+   ```bash
+   go build -o cf-dns-bot ./cmd/bot
+   go build -o cf-dns-mcp ./cmd/mcp-server
+   ```
+
+2. **Install PM2**
+   ```bash
+   npm install -g pm2
+   ```
+
+3. **Start services**
+   ```bash
+   pm2 start ecosystem.config.js
+   pm2 save
+   pm2 startup
+   ```
+
+4. **Monitor logs**
+   ```bash
+   pm2 logs
+   pm2 logs cf-dns-bot
+   pm2 logs cf-dns-mcp
+   ```
+
+5. **Auto-restart on boot**
+   ```bash
+   pm2 save
+   pm2 startup systemd
+   # Follow the command output
+   ```
 
 ## Project Structure for REST API (Future)
 
