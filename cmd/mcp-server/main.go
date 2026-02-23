@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"cf-dns-bot/external_resource/cloudflare"
 	"cf-dns-bot/internal/domain"
@@ -592,9 +594,59 @@ func main() {
 func startHTTPServer(s *server.MCPServer, port string) {
 	addr := ":" + port
 
+	// Load API keys from environment
+	apiKeys := loadAPIKeys()
+	if len(apiKeys) == 0 {
+		log.Println("[WARNING] No API keys configured. Set MCP_API_KEY environment variable.")
+		log.Println("[WARNING] Generate a key with: openssl rand -hex 32")
+	}
+
 	// Simple HTTP handler for MCP over HTTP
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+
+		// API Key Authentication
+		if len(apiKeys) > 0 {
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"error": map[string]interface{}{
+						"code":    -32001,
+						"message": "Missing Authorization header",
+					},
+				})
+				return
+			}
+
+			// Extract Bearer token
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"error": map[string]interface{}{
+						"code":    -32001,
+						"message": "Invalid Authorization format. Use: Bearer <token>",
+					},
+				})
+				return
+			}
+
+			apiKey := parts[1]
+			if !isValidAPIKey(apiKeys, apiKey) {
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"jsonrpc": "2.0",
+					"error": map[string]interface{}{
+						"code":    -32001,
+						"message": "Invalid API key",
+					},
+				})
+				return
+			}
+		}
 
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -808,4 +860,36 @@ func handleToolCall(s *server.MCPServer, params map[string]interface{}) (interfa
 			},
 		},
 	}, nil
+}
+
+// loadAPIKeys loads API keys from environment variable
+func loadAPIKeys() []string {
+	keys := []string{}
+
+	// Primary key
+	if key := os.Getenv("MCP_API_KEY"); key != "" {
+		keys = append(keys, key)
+	}
+
+	// Multiple keys (comma-separated)
+	if keysStr := os.Getenv("MCP_API_KEYS"); keysStr != "" {
+		for _, key := range strings.Split(keysStr, ",") {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				keys = append(keys, key)
+			}
+		}
+	}
+
+	return keys
+}
+
+// isValidAPIKey checks if the provided key is valid
+func isValidAPIKey(validKeys []string, key string) bool {
+	for _, validKey := range validKeys {
+		if subtle.ConstantTimeCompare([]byte(key), []byte(validKey)) == 1 {
+			return true
+		}
+	}
+	return false
 }
