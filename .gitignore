@@ -6,6 +6,7 @@
 *.dylib
 cf-dns-bot
 cf-dns-mcp
+cf-dns-mcp-http
 
 # Test binary, built with `go test -c`
 *.test
