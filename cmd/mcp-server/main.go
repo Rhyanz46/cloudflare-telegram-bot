@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"os"
 
 	"cf-dns-bot/external_resource/cloudflare"
 	"cf-dns-bot/internal/domain"
@@ -562,9 +564,248 @@ func main() {
 		}, nil
 	})
 
-	// Start server
-	log.Println("Starting MCP server...")
-	if err := server.ServeStdio(s); err != nil {
+	// Determine transport mode
+	transport := os.Getenv("MCP_TRANSPORT")
+	if transport == "" {
+		transport = "stdio" // default
+	}
+
+	port := os.Getenv("MCP_PORT")
+	if port == "" {
+		port = "3000"
+	}
+
+	switch transport {
+	case "http":
+		// HTTP transport for remote access
+		startHTTPServer(s, port)
+	default:
+		// Stdio transport (default) for local CLI
+		log.Println("Starting MCP stdio server...")
+		if err := server.ServeStdio(s); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
+	}
+}
+
+// startHTTPServer starts MCP server with HTTP transport
+func startHTTPServer(s *server.MCPServer, port string) {
+	addr := ":" + port
+
+	// Simple HTTP handler for MCP over HTTP
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"error": map[string]interface{}{
+					"code":    -32600,
+					"message": "Method not allowed",
+				},
+			})
+			return
+		}
+
+		var req struct {
+			JSONRPC string                 `json:"jsonrpc"`
+			ID      interface{}            `json:"id"`
+			Method  string                 `json:"method"`
+			Params  map[string]interface{} `json:"params"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"error": map[string]interface{}{
+					"code":    -32700,
+					"message": "Parse error: " + err.Error(),
+				},
+			})
+			return
+		}
+
+		// Handle MCP methods
+		var result interface{}
+		var err error
+
+		switch req.Method {
+		case "initialize":
+			result = map[string]interface{}{
+				"protocolVersion": "2024-11-05",
+				"capabilities": map[string]interface{}{
+					"tools": map[string]interface{}{"listChanged": true},
+				},
+				"serverInfo": map[string]interface{}{
+					"name":    "cf-dns",
+					"version": "1.0.0",
+				},
+			}
+		case "tools/list":
+			result = getToolsList()
+		case "tools/call":
+			result, err = handleToolCall(s, req.Params)
+		default:
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"error": map[string]interface{}{
+					"code":    -32601,
+					"message": "Method not found: " + req.Method,
+				},
+			})
+			return
+		}
+
+		response := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+		}
+
+		if err != nil {
+			response["error"] = map[string]interface{}{
+				"code":    -32603,
+				"message": err.Error(),
+			}
+		} else {
+			response["result"] = result
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
+	})
+
+	log.Printf("Starting MCP HTTP server on %s", addr)
+	log.Printf("Endpoint: http://localhost%s/", addr)
+	log.Printf("Send MCP JSON-RPC requests via POST")
+
+	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
+}
+
+// getToolsList returns list of available tools
+func getToolsList() map[string]interface{} {
+	return map[string]interface{}{
+		"tools": []map[string]interface{}{
+			{
+				"name":        "list_zones",
+				"description": "List all Cloudflare zones/domains",
+				"inputSchema": map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+			{
+				"name":        "list_records",
+				"description": "List all DNS records for a specific zone",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"zone_name": map[string]interface{}{
+							"type":        "string",
+							"description": "The zone/domain name",
+						},
+					},
+					"required": []string{"zone_name"},
+				},
+			},
+			{
+				"name":        "get_record",
+				"description": "Get details of a specific DNS record",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"zone_name": map[string]interface{}{
+							"type":        "string",
+							"description": "The zone/domain name",
+						},
+						"record_name": map[string]interface{}{
+							"type":        "string",
+							"description": "The full record name",
+						},
+					},
+					"required": []string{"zone_name", "record_name"},
+				},
+			},
+			{
+				"name":        "create_record",
+				"description": "Create a new DNS record",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"zone_name": map[string]interface{}{"type": "string"},
+						"name":      map[string]interface{}{"type": "string"},
+						"type":      map[string]interface{}{"type": "string"},
+						"content":   map[string]interface{}{"type": "string"},
+						"ttl":       map[string]interface{}{"type": "number"},
+						"proxied":   map[string]interface{}{"type": "boolean"},
+					},
+					"required": []string{"zone_name", "name", "type", "content"},
+				},
+			},
+			{
+				"name":        "update_record",
+				"description": "Update an existing DNS record",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"zone_name": map[string]interface{}{"type": "string"},
+						"record_id": map[string]interface{}{"type": "string"},
+						"name":      map[string]interface{}{"type": "string"},
+						"type":      map[string]interface{}{"type": "string"},
+						"content":   map[string]interface{}{"type": "string"},
+						"ttl":       map[string]interface{}{"type": "number"},
+						"proxied":   map[string]interface{}{"type": "boolean"},
+					},
+					"required": []string{"zone_name", "record_id", "name", "type", "content"},
+				},
+			},
+			{
+				"name":        "delete_record",
+				"description": "Delete a DNS record",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"zone_name":   map[string]interface{}{"type": "string"},
+						"record_name": map[string]interface{}{"type": "string"},
+					},
+					"required": []string{"zone_name", "record_name"},
+				},
+			},
+			{
+				"name":        "upsert_record",
+				"description": "Create or update a DNS record",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"zone_name": map[string]interface{}{"type": "string"},
+						"name":      map[string]interface{}{"type": "string"},
+						"type":      map[string]interface{}{"type": "string"},
+						"content":   map[string]interface{}{"type": "string"},
+						"ttl":       map[string]interface{}{"type": "number"},
+						"proxied":   map[string]interface{}{"type": "boolean"},
+					},
+					"required": []string{"zone_name", "name", "type", "content"},
+				},
+			},
+		},
+	}
+}
+
+// handleToolCall handles tool execution
+func handleToolCall(s *server.MCPServer, params map[string]interface{}) (interface{}, error) {
+	// Tool calls would be handled here
+	// For now, return a placeholder
+	return map[string]interface{}{
+		"content": []map[string]interface{}{
+			{
+				"type": "text",
+				"text": "Tool execution not yet implemented in HTTP mode. Use stdio transport.",
+			},
+		},
+	}, nil
 }
