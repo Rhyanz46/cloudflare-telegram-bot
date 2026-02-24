@@ -44,20 +44,29 @@ type MCPHTTPServerController interface {
 	GetPort() string
 }
 
+// PendingRequestStorage defines the interface for pending request storage
+type PendingRequestStorage interface {
+	GetPendingRequests() ([]storage.PendingRequest, error)
+	AddPendingRequest(req storage.PendingRequest) error
+	RemovePendingRequest(userID int64) error
+	IsPendingRequest(userID int64) (bool, error)
+}
+
 // Bot implements handler.BotHandler for Telegram with button-based UI
 type Bot struct {
-	dnsUsecase      usecase.DNSUsecase
-	bot             *tgbotapi.BotAPI
-	token           string
-	allowedIDs      map[int64]bool
-	stateManager    *StateManager
-	apiKeyStorage   APIKeyStorage
-	configStorage   ConfigStorage
-	mcpHTTPController MCPHTTPServerController
+	dnsUsecase         usecase.DNSUsecase
+	bot                *tgbotapi.BotAPI
+	token              string
+	allowedIDs         map[int64]bool
+	stateManager       *StateManager
+	apiKeyStorage      APIKeyStorage
+	configStorage      ConfigStorage
+	mcpHTTPController  MCPHTTPServerController
+	pendingReqStorage  PendingRequestStorage
 }
 
 // NewBot creates a new Telegram bot handler
-func NewBot(dnsUsecase usecase.DNSUsecase, token string, allowedUsers []int64, apiKeyStorage APIKeyStorage, configStorage ConfigStorage, mcpHTTPController MCPHTTPServerController) *Bot {
+func NewBot(dnsUsecase usecase.DNSUsecase, token string, allowedUsers []int64, apiKeyStorage APIKeyStorage, configStorage ConfigStorage, mcpHTTPController MCPHTTPServerController, pendingReqStorage PendingRequestStorage) *Bot {
 	allowedIDs := make(map[int64]bool)
 	for _, id := range allowedUsers {
 		allowedIDs[id] = true
@@ -71,6 +80,7 @@ func NewBot(dnsUsecase usecase.DNSUsecase, token string, allowedUsers []int64, a
 		apiKeyStorage:     apiKeyStorage,
 		configStorage:     configStorage,
 		mcpHTTPController: mcpHTTPController,
+		pendingReqStorage: pendingReqStorage,
 	}
 }
 
@@ -95,7 +105,7 @@ func (b *Bot) Start() error {
 	for update := range updates {
 		if update.Message != nil {
 			if !b.isAuthorized(update.Message.From.ID) {
-				b.sendMessage(update.Message.Chat.ID, "⛔ You are not authorized to use this bot.")
+				b.handleUnauthorizedUser(update.Message)
 				continue
 			}
 			go func(msg *tgbotapi.Message) {
@@ -152,6 +162,179 @@ func (b *Bot) notifyAdminOnStartup() {
 	for userID := range b.allowedIDs {
 		b.sendMessage(userID, message)
 	}
+}
+
+// handleUnauthorizedUser handles unauthorized users by offering to send access request
+func (b *Bot) handleUnauthorizedUser(msg *tgbotapi.Message) {
+	userID := msg.From.ID
+	chatID := msg.Chat.ID
+
+	// Check if already pending
+	if b.pendingReqStorage != nil {
+		isPending, _ := b.pendingReqStorage.IsPendingRequest(userID)
+		if isPending {
+			b.sendMessage(chatID, "⏳ Your access request is pending approval. Please wait for an admin to review your request.")
+			return
+		}
+	}
+
+	// Show request access button
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📝 Request Access", "request_access"),
+		),
+	)
+
+	b.sendMessageWithKeyboard(chatID, "⛔ *Access Denied*\n\nYou are not authorized to use this bot. Would you like to request access?", keyboard)
+}
+
+// handleRequestAccess handles access request from unauthorized user
+func (b *Bot) handleRequestAccess(chatID int64, userID int64, user *tgbotapi.User) {
+	if b.pendingReqStorage == nil {
+		b.sendMessage(chatID, "❌ Request system is not available. Please contact the admin directly.")
+		return
+	}
+
+	// Check if already pending
+	isPending, _ := b.pendingReqStorage.IsPendingRequest(userID)
+	if isPending {
+		b.sendMessage(chatID, "⏳ Your access request is already pending approval.")
+		return
+	}
+
+	// Create pending request
+	req := storage.PendingRequest{
+		UserID:    userID,
+		Username:  user.UserName,
+		FirstName: user.FirstName,
+		LastName:  user.LastName,
+	}
+
+	if err := b.pendingReqStorage.AddPendingRequest(req); err != nil {
+		b.sendMessage(chatID, "❌ Failed to submit request. Please try again later.")
+		return
+	}
+
+	// Notify user
+	b.sendMessage(chatID, "✅ *Access Request Submitted*\n\nYour request has been sent to the admin. You will be notified once it's approved.")
+
+	// Notify all admins
+	b.notifyAdminsOfNewRequest(req)
+}
+
+// notifyAdminsOfNewRequest sends notification to all admins about a new access request
+func (b *Bot) notifyAdminsOfNewRequest(req storage.PendingRequest) {
+	if len(b.allowedIDs) == 0 {
+		return
+	}
+
+	userInfo := fmt.Sprintf("User ID: `%d`", req.UserID)
+	if req.Username != "" {
+		userInfo += fmt.Sprintf("\nUsername: @%s", req.Username)
+	}
+	if req.FirstName != "" {
+		userInfo += fmt.Sprintf("\nName: %s", req.FirstName)
+		if req.LastName != "" {
+			userInfo += fmt.Sprintf(" %s", req.LastName)
+		}
+	}
+
+	message := fmt.Sprintf(
+		"🔔 *New Access Request*\n\n%s\n\nWould you like to approve this request?",
+		userInfo,
+	)
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Approve", fmt.Sprintf("approve_request:%d", req.UserID)),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Reject", fmt.Sprintf("reject_request:%d", req.UserID)),
+		),
+	)
+
+	for adminID := range b.allowedIDs {
+		b.sendMessageWithKeyboard(adminID, message, keyboard)
+	}
+}
+
+// handleApproveRequest handles admin approving an access request
+func (b *Bot) handleApproveRequest(chatID int64, adminID int64, messageID int, userID int64) {
+	if b.pendingReqStorage == nil {
+		b.sendMessage(chatID, "❌ Request system is not available.")
+		return
+	}
+
+	// Get pending requests to find the user info
+	requests, _ := b.pendingReqStorage.GetPendingRequests()
+	var foundReq *storage.PendingRequest
+	for _, r := range requests {
+		if r.UserID == userID {
+			foundReq = &r
+			break
+		}
+	}
+
+	if foundReq == nil {
+		b.editMessage(chatID, messageID, "❌ Request not found or already processed.", nil)
+		return
+	}
+
+	// Remove from pending
+	if err := b.pendingReqStorage.RemovePendingRequest(userID); err != nil {
+		b.editMessage(chatID, messageID, "❌ Failed to process request.", nil)
+		return
+	}
+
+	// Add to allowed users
+	b.allowedIDs[userID] = true
+
+	// Notify admin
+	userInfo := fmt.Sprintf("User ID: `%d`", foundReq.UserID)
+	if foundReq.Username != "" {
+		userInfo += fmt.Sprintf(" (@%s)", foundReq.Username)
+	}
+	b.editMessage(chatID, messageID, fmt.Sprintf("✅ *Request Approved*\n\n%s has been granted access.", userInfo), nil)
+
+	// Notify user
+	b.sendMessage(userID, "🎉 *Access Granted!*\n\nYour request has been approved. You can now use the bot. Send /start to begin.")
+}
+
+// handleRejectRequest handles admin rejecting an access request
+func (b *Bot) handleRejectRequest(chatID int64, adminID int64, messageID int, userID int64) {
+	if b.pendingReqStorage == nil {
+		b.sendMessage(chatID, "❌ Request system is not available.")
+		return
+	}
+
+	// Get pending requests to find the user info
+	requests, _ := b.pendingReqStorage.GetPendingRequests()
+	var foundReq *storage.PendingRequest
+	for _, r := range requests {
+		if r.UserID == userID {
+			foundReq = &r
+			break
+		}
+	}
+
+	if foundReq == nil {
+		b.editMessage(chatID, messageID, "❌ Request not found or already processed.", nil)
+		return
+	}
+
+	// Remove from pending
+	if err := b.pendingReqStorage.RemovePendingRequest(userID); err != nil {
+		b.editMessage(chatID, messageID, "❌ Failed to process request.", nil)
+		return
+	}
+
+	// Notify admin
+	userInfo := fmt.Sprintf("User ID: `%d`", foundReq.UserID)
+	if foundReq.Username != "" {
+		userInfo += fmt.Sprintf(" (@%s)", foundReq.Username)
+	}
+	b.editMessage(chatID, messageID, fmt.Sprintf("❌ *Request Rejected*\n\n%s has been denied access.", userInfo), nil)
+
+	// Notify user
+	b.sendMessage(userID, "❌ *Access Denied*\n\nYour request has been rejected. You cannot use this bot.")
 }
 
 // sendMessage sends a message to a chat
@@ -371,6 +554,18 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 		}
 	case "mcphttp_status":
 		b.handleMCPHTTPStatus(chatID, userID)
+	case "request_access":
+		b.handleRequestAccess(chatID, userID, callback.From)
+	case "approve_request":
+		if len(parts) > 1 {
+			targetUserID, _ := strconv.ParseInt(parts[1], 10, 64)
+			b.handleApproveRequest(chatID, userID, messageID, targetUserID)
+		}
+	case "reject_request":
+		if len(parts) > 1 {
+			targetUserID, _ := strconv.ParseInt(parts[1], 10, 64)
+			b.handleRejectRequest(chatID, userID, messageID, targetUserID)
+		}
 	}
 }
 

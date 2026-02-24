@@ -27,6 +27,7 @@ type CombinedStorage interface {
 	ConfigStorage
 	APIKeyStorage
 	MCPHTTPConfigStorage
+	PendingRequestStorage
 }
 
 // NewJSONStorageWithAPIKeys creates a new JSON storage that implements all storage interfaces
@@ -86,12 +87,13 @@ func (s *jsonStorage) Save(cfg *Config) error {
 // defaultConfig returns default configuration
 func (s *jsonStorage) defaultConfig() *Config {
 	return &Config{
-		AllowedUsers:   []int64{},
-		DefaultTTL:     300,
-		DefaultProxied: true,
-		MCPAPIKeys:     []string{},
-		MCPHTTPPort:    "8875",
-		MCPHTTPEnabled: true,
+		AllowedUsers:    []int64{},
+		PendingRequests: []PendingRequest{},
+		DefaultTTL:      300,
+		DefaultProxied:  true,
+		MCPAPIKeys:      []string{},
+		MCPHTTPPort:     "8875",
+		MCPHTTPEnabled:  true,
 	}
 }
 
@@ -201,4 +203,71 @@ func (s *jsonStorage) SetMCPHTTPEnabled(enabled bool) error {
 	}
 	cfg.MCPHTTPEnabled = enabled
 	return s.Save(cfg)
+}
+
+// GetPendingRequests returns all pending access requests
+func (s *jsonStorage) GetPendingRequests() ([]PendingRequest, error) {
+	cfg, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+	return cfg.PendingRequests, nil
+}
+
+// AddPendingRequest adds a new pending access request
+func (s *jsonStorage) AddPendingRequest(req PendingRequest) error {
+	cfg, err := s.Load()
+	if err != nil {
+		return err
+	}
+
+	// Check if already pending
+	for _, r := range cfg.PendingRequests {
+		if r.UserID == req.UserID {
+			return fmt.Errorf("request already pending")
+		}
+	}
+
+	cfg.PendingRequests = append(cfg.PendingRequests, req)
+	return s.Save(cfg)
+}
+
+// RemovePendingRequest removes a pending access request
+func (s *jsonStorage) RemovePendingRequest(userID int64) error {
+	cfg, err := s.Load()
+	if err != nil {
+		return err
+	}
+
+	found := false
+	newRequests := make([]PendingRequest, 0, len(cfg.PendingRequests))
+	for _, r := range cfg.PendingRequests {
+		if r.UserID == userID {
+			found = true
+			continue
+		}
+		newRequests = append(newRequests, r)
+	}
+
+	if !found {
+		return fmt.Errorf("pending request not found")
+	}
+
+	cfg.PendingRequests = newRequests
+	return s.Save(cfg)
+}
+
+// IsPendingRequest checks if a user has a pending access request
+func (s *jsonStorage) IsPendingRequest(userID int64) (bool, error) {
+	cfg, err := s.Load()
+	if err != nil {
+		return false, err
+	}
+
+	for _, r := range cfg.PendingRequests {
+		if r.UserID == userID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
