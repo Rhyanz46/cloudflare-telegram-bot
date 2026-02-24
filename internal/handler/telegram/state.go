@@ -33,6 +33,7 @@ const (
 	StepEditRecordTTL
 	StepEditRecordProxied
 	StepConfirmDelete
+	StepInputMCPHTTPPort
 )
 
 // StateManager manages user states

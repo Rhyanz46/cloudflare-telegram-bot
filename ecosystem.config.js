@@ -15,7 +15,8 @@ module.exports = {
     min_uptime: '10s',
     max_restarts: 5,
     env: {
-      NODE_ENV: 'production'
+      NODE_ENV: 'production',
+      MCP_HTTP_PORT: '8875'
     },
     log_file: path.join(baseDir, 'logs', 'cf-dns-bot.log'),
     out_file: path.join(baseDir, 'logs', 'cf-dns-bot-out.log'),
@@ -39,28 +40,6 @@ module.exports = {
     log_file: path.join(baseDir, 'logs', 'cf-dns-mcp.log'),
     out_file: path.join(baseDir, 'logs', 'cf-dns-mcp-out.log'),
     error_file: path.join(baseDir, 'logs', 'cf-dns-mcp-error.log'),
-    time: true,
-    kill_timeout: 5000,
-    listen_timeout: 10000
-  }, {
-    name: 'cf-dns-mcp-http',
-    script: path.join(baseDir, 'cf-dns-mcp-http'),
-    cwd: baseDir,
-    instances: 1,
-    autorestart: true,
-    watch: false,
-    max_memory_restart: '500M',
-    min_uptime: '10s',
-    max_restarts: 5,
-    env: {
-      NODE_ENV: 'production',
-      MCP_HTTP_PORT: '8080',
-      MCP_MANAGEMENT_KEY: process.env.MCP_MANAGEMENT_KEY || '',
-      MCP_API_KEYS: process.env.MCP_API_KEYS || ''
-    },
-    log_file: path.join(baseDir, 'logs', 'cf-dns-mcp-http.log'),
-    out_file: path.join(baseDir, 'logs', 'cf-dns-mcp-http-out.log'),
-    error_file: path.join(baseDir, 'logs', 'cf-dns-mcp-http-error.log'),
     time: true,
     kill_timeout: 5000,
     listen_timeout: 10000
