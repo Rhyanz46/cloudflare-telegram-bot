@@ -200,6 +200,8 @@ func (b *Bot) setupHandlers() {
 
 	// Handle callback data with pattern matching
 	b.bot.Handle(tele.OnCallback, func(c tele.Context) error {
+		data := c.Data()
+		log.Printf("[OnCallback] Raw callback data: %q, Unique: %q", data, c.Callback().Unique)
 		return b.handleCallback(c)
 	})
 }
