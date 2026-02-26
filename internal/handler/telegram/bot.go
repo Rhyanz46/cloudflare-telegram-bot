@@ -301,8 +301,8 @@ func (b *Bot) handleCallback(c tele.Context) error {
 	// Answer callback
 	c.Respond()
 
-	// Parse callback data
-	parts := strings.Split(data, ":")
+	// Parse callback data - telebot.v3 uses \x01 as separator
+	parts := strings.Split(data, "\x01")
 	action := parts[0]
 
 	switch action {
