@@ -139,15 +139,25 @@ func (b *Bot) setupHandlers() {
 		}
 	})
 
-	// Store thread ID middleware
+	// Thread ID middleware - ensures all replies go to the same thread
 	b.bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
 		return func(c tele.Context) error {
-			// Store thread ID from message or callback
+			// Get thread ID from incoming message
+			threadID := 0
 			if c.Message() != nil && c.Message().ThreadID != 0 {
-				b.stateManager.SetData(c.Sender().ID, "thread_id", c.Message().ThreadID)
-			}
-			if c.Callback() != nil && c.Callback().Message != nil && c.Callback().Message.ThreadID != 0 {
-				b.stateManager.SetData(c.Sender().ID, "thread_id", c.Callback().Message.ThreadID)
+				threadID = c.Message().ThreadID
+				b.stateManager.SetData(c.Sender().ID, "thread_id", threadID)
+				log.Printf("[Middleware] Stored thread_id %d from message for user %d", threadID, c.Sender().ID)
+			} else if c.Callback() != nil && c.Callback().Message != nil && c.Callback().Message.ThreadID != 0 {
+				threadID = c.Callback().Message.ThreadID
+				b.stateManager.SetData(c.Sender().ID, "thread_id", threadID)
+				log.Printf("[Middleware] Stored thread_id %d from callback for user %d", threadID, c.Sender().ID)
+			} else {
+				// Try to get from state
+				if storedID, exists := b.stateManager.GetData(c.Sender().ID, "thread_id"); exists {
+					threadID = storedID.(int)
+					log.Printf("[Middleware] Retrieved thread_id %d from state for user %d", threadID, c.Sender().ID)
+				}
 			}
 			return next(c)
 		}
@@ -439,7 +449,8 @@ func (b *Bot) getThreadIDFromContext(c tele.Context) int {
 func (b *Bot) sendWithThread(c tele.Context, text string, opts ...interface{}) error {
 	threadID := b.getThreadIDFromContext(c)
 	if threadID != 0 {
-		opts = append(opts, &tele.SendOptions{ThreadID: threadID})
+		// Prepend SendOptions to ensure it's processed correctly
+		opts = append([]interface{}{&tele.SendOptions{ThreadID: threadID}}, opts...)
 	}
 	return c.Send(text, opts...)
 }
@@ -448,7 +459,8 @@ func (b *Bot) sendWithThread(c tele.Context, text string, opts ...interface{}) e
 func (b *Bot) editWithThread(c tele.Context, text string, opts ...interface{}) error {
 	threadID := b.getThreadIDFromContext(c)
 	if threadID != 0 {
-		opts = append(opts, &tele.SendOptions{ThreadID: threadID})
+		// Prepend SendOptions to ensure it's processed correctly
+		opts = append([]interface{}{&tele.SendOptions{ThreadID: threadID}}, opts...)
 	}
 	return c.Edit(text, opts...)
 }
@@ -468,11 +480,11 @@ func (b *Bot) showZones(c tele.Context) error {
 	ctx := context.Background()
 	zones, err := b.dnsUsecase.ListZones(ctx)
 	if err != nil {
-		return c.Send(fmt.Sprintf("❌ Error: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error: %v", err), tele.ModeMarkdown)
 	}
 
 	if len(zones) == 0 {
-		return c.Send("📭 No zones found.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "📭 No zones found.", tele.ModeMarkdown)
 	}
 
 	var text strings.Builder
@@ -485,7 +497,7 @@ func (b *Bot) showZones(c tele.Context) error {
 	btnBack := menu.Data("◀️ Back to Menu", "menu")
 	menu.Inline(menu.Row(btnBack))
 
-	return c.Send(text.String(), menu, tele.ModeMarkdown)
+	return b.sendWithThread(c, text.String(), menu, tele.ModeMarkdown)
 }
 
 // startCreateRecord starts the create record flow
@@ -493,11 +505,11 @@ func (b *Bot) startCreateRecord(c tele.Context) error {
 	ctx := context.Background()
 	zones, err := b.dnsUsecase.ListZones(ctx)
 	if err != nil {
-		return c.Send(fmt.Sprintf("❌ Error: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error: %v", err), tele.ModeMarkdown)
 	}
 
 	if len(zones) == 0 {
-		return c.Send("📭 No zones found.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "📭 No zones found.", tele.ModeMarkdown)
 	}
 
 	userID := c.Sender().ID
@@ -518,7 +530,7 @@ func (b *Bot) startCreateRecord(c tele.Context) error {
 	rows = append(rows, menu.Row(menu.Data("◀️ Cancel", "menu")))
 	menu.Inline(rows...)
 
-	return c.Send("*➕ Create DNS Record*\n\nStep 1/6: Select a zone:", menu, tele.ModeMarkdown)
+	return b.sendWithThread(c, "*➕ Create DNS Record*\n\nStep 1/6: Select a zone:", menu, tele.ModeMarkdown)
 }
 
 // handleZoneSelectedForCreate handles zone selection for create
