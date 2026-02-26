@@ -131,6 +131,14 @@ func (b *Bot) setupHandlers() {
 	// Middleware for authorization
 	b.bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
 		return func(c tele.Context) error {
+			// Allow request_access callback even for unauthorized users
+			if c.Callback() != nil {
+				data := c.Data()
+				data = strings.TrimPrefix(data, "\f")
+				if strings.HasPrefix(data, "request_access") {
+					return next(c)
+				}
+			}
 			if !b.isAuthorized(c.Sender().ID) {
 				b.handleUnauthorizedUser(c)
 				return nil
@@ -238,17 +246,12 @@ func (b *Bot) notifyAdminOnStartup() {
 // handleUnauthorizedUser handles unauthorized users
 func (b *Bot) handleUnauthorizedUser(c tele.Context) {
 	userID := c.Sender().ID
-	chatID := c.Chat().ID
-	threadID := 0
-	if c.Message() != nil {
-		threadID = c.Message().ThreadID
-	}
 
 	// Check if already pending
 	if b.pendingReqStorage != nil {
 		isPending, _ := b.pendingReqStorage.IsPendingRequest(userID)
 		if isPending {
-			b.sendMessage(chatID, "⏳ Your access request is pending approval. Please wait for an admin to review your request.", threadID)
+			c.Send("⏳ Your access request is pending approval. Please wait for an admin to review your request.", tele.ModeMarkdown)
 			return
 		}
 	}
@@ -258,7 +261,7 @@ func (b *Bot) handleUnauthorizedUser(c tele.Context) {
 	btnRequest := menu.Data("📝 Request Access", "request_access")
 	menu.Inline(menu.Row(btnRequest))
 
-	b.sendMessageWithMarkup(chatID, "⛔ *Access Denied*\n\nYou are not authorized to use this bot. Would you like to request access?", menu, threadID)
+	c.Send("⛔ *Access Denied*\n\nYou are not authorized to use this bot. Would you like to request access?", menu, tele.ModeMarkdown)
 }
 
 // handleTextMessage handles incoming text messages
