@@ -4,9 +4,9 @@ go 1.23.2
 
 require (
 	github.com/cloudflare/cloudflare-go v0.86.0
-	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/joho/godotenv v1.5.1
 	github.com/mark3labs/mcp-go v0.5.0
+	gopkg.in/telebot.v3 v3.3.8
 )
 
 require (
