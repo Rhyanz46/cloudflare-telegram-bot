@@ -53,6 +53,14 @@ type PendingRequestStorage interface {
 	IsPendingRequest(userID int64) (bool, error)
 }
 
+// AllowedUserStorage defines the interface for allowed user storage with scope
+type AllowedUserStorage interface {
+	GetAllowedUsers() ([]storage.AllowedUser, error)
+	AddAllowedUser(userID int64, scope storage.AccessScope) error
+	RemoveAllowedUser(userID int64) error
+	IsUserAllowed(userID int64, chatID int64, threadID int) bool
+}
+
 // Bot implements handler.BotHandler for Telegram with button-based UI
 type Bot struct {
 	dnsUsecase        usecase.DNSUsecase
@@ -64,10 +72,11 @@ type Bot struct {
 	configStorage     ConfigStorage
 	mcpHTTPController MCPHTTPServerController
 	pendingReqStorage PendingRequestStorage
+	allowedUserStorage AllowedUserStorage
 }
 
 // NewBot creates a new Telegram bot handler
-func NewBot(dnsUsecase usecase.DNSUsecase, token string, allowedUsers []int64, apiKeyStorage APIKeyStorage, configStorage ConfigStorage, mcpHTTPController MCPHTTPServerController, pendingReqStorage PendingRequestStorage) *Bot {
+func NewBot(dnsUsecase usecase.DNSUsecase, token string, allowedUsers []int64, apiKeyStorage APIKeyStorage, configStorage ConfigStorage, mcpHTTPController MCPHTTPServerController, pendingReqStorage PendingRequestStorage, allowedUserStorage AllowedUserStorage) *Bot {
 	allowedIDs := make(map[int64]bool)
 	for _, id := range allowedUsers {
 		allowedIDs[id] = true
@@ -82,6 +91,7 @@ func NewBot(dnsUsecase usecase.DNSUsecase, token string, allowedUsers []int64, a
 		configStorage:     configStorage,
 		mcpHTTPController: mcpHTTPController,
 		pendingReqStorage: pendingReqStorage,
+		allowedUserStorage: allowedUserStorage,
 	}
 }
 
@@ -103,6 +113,9 @@ func (b *Bot) Start() error {
 	// Send startup notification to all admin users
 	b.notifyAdminOnStartup()
 
+	// Resend pending request notifications on startup
+	b.resendPendingRequestNotifications()
+
 	// Setup handlers
 	b.setupHandlers()
 
@@ -118,7 +131,7 @@ func (b *Bot) Stop() error {
 	return nil
 }
 
-// isAuthorized checks if a user is authorized
+// isAuthorized checks if a user is authorized (backward compatibility)
 func (b *Bot) isAuthorized(userID int64) bool {
 	if len(b.allowedIDs) == 0 {
 		return true
@@ -126,9 +139,29 @@ func (b *Bot) isAuthorized(userID int64) bool {
 	return b.allowedIDs[userID]
 }
 
+// isAuthorizedWithScope checks if a user is authorized for a specific chat/thread scope
+func (b *Bot) isAuthorizedWithScope(userID int64, chatID int64, threadID int) bool {
+	// Check legacy allowed IDs first (backward compatibility)
+	if len(b.allowedIDs) == 0 {
+		return true
+	}
+
+	// If user is in legacy allowed IDs and no scope storage available, allow
+	if b.allowedIDs[userID] && b.allowedUserStorage == nil {
+		return true
+	}
+
+	// Check scope-based authorization
+	if b.allowedUserStorage != nil {
+		return b.allowedUserStorage.IsUserAllowed(userID, chatID, threadID)
+	}
+
+	return false
+}
+
 // setupHandlers sets up all bot handlers
 func (b *Bot) setupHandlers() {
-	// Middleware for authorization
+	// Middleware for authorization with scope check
 	b.bot.Use(func(next tele.HandlerFunc) tele.HandlerFunc {
 		return func(c tele.Context) error {
 			// Allow request_access callback even for unauthorized users
@@ -139,7 +172,18 @@ func (b *Bot) setupHandlers() {
 					return next(c)
 				}
 			}
-			if !b.isAuthorized(c.Sender().ID) {
+
+			// Get chat and thread info for scope checking
+			chatID := c.Chat().ID
+			threadID := 0
+			if c.Message() != nil {
+				threadID = c.Message().ThreadID
+			} else if c.Callback() != nil && c.Callback().Message != nil {
+				threadID = c.Callback().Message.ThreadID
+			}
+
+			// Check authorization with scope
+			if !b.isAuthorizedWithScope(c.Sender().ID, chatID, threadID) {
 				b.handleUnauthorizedUser(c)
 				return nil
 			}
@@ -190,6 +234,14 @@ func (b *Bot) setupHandlers() {
 			return c.Send("⛔ You are not authorized to use this command.", tele.ModeMarkdown)
 		}
 		return b.handleAddUserCommand(c)
+	})
+
+	b.bot.Handle("/users", func(c tele.Context) error {
+		// Only admins can use this command
+		if !b.isAuthorized(c.Sender().ID) {
+			return c.Send("⛔ You are not authorized to use this command.", tele.ModeMarkdown)
+		}
+		return b.showAllowedUsers(c)
 	})
 
 	// Callback handlers
@@ -370,6 +422,8 @@ func (b *Bot) handleCallback(c tele.Context) error {
 		return b.showMCPHTTPMenu(c)
 	case "apikeys":
 		return b.showAPIKeysMenu(c)
+	case "users":
+		return b.showAllowedUsers(c)
 	case "view_rec":
 		if len(parts) >= 4 {
 			return b.handleViewRecord(c, chatID, userID, messageID, parts[1], parts[2], parts[3])
@@ -414,6 +468,10 @@ func (b *Bot) handleCallback(c tele.Context) error {
 	case "reject_request":
 		if len(parts) >= 2 {
 			return b.handleRejectRequest(c, parts[1])
+		}
+	case "remove_user":
+		if len(parts) >= 2 {
+			return b.handleRemoveUser(c, parts[1])
 		}
 	case "noop":
 		// Do nothing for pagination display button
@@ -519,7 +577,19 @@ func (b *Bot) showMainMenu(c tele.Context) error {
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
 	btnManage := menu.Data("🔍 Manage Records", "manage")
 	btnMCPHTTP := menu.Data("🌐 MCP HTTP Server", "mcphttp")
-	menu.Inline(menu.Row(btnManage), menu.Row(btnMCPHTTP))
+
+	// Check if this is a private chat (admin only features)
+	chatID := c.Chat().ID
+	isPrivateChat := chatID > 0
+
+	if isPrivateChat {
+		// In private chat, show Users button for admin
+		btnUsers := menu.Data("👥 Users", "users")
+		menu.Inline(menu.Row(btnManage), menu.Row(btnMCPHTTP), menu.Row(btnUsers))
+	} else {
+		// In group/thread, only show basic buttons
+		menu.Inline(menu.Row(btnManage), menu.Row(btnMCPHTTP))
+	}
 
 	return b.sendWithThread(c, "*🏠 Main Menu*\n\nWhat would you like to do?", menu, tele.ModeMarkdown)
 }
@@ -1275,57 +1345,160 @@ func (b *Bot) handleAPIKeyDelete(c tele.Context, keyIdxStr string) error {
 
 // handleRequestAccess handles access requests from unauthorized users
 func (b *Bot) handleRequestAccess(c tele.Context, userID int64) error {
+	log.Printf("[handleRequestAccess] Processing access request from user %d", userID)
+
 	if b.pendingReqStorage == nil {
+		log.Printf("[handleRequestAccess] ERROR: pendingReqStorage is nil")
 		return b.sendWithThread(c, "❌ Request system not configured.", tele.ModeMarkdown)
 	}
 
 	// Check if already pending
 	isPending, _ := b.pendingReqStorage.IsPendingRequest(userID)
 	if isPending {
+		log.Printf("[handleRequestAccess] User %d already has a pending request", userID)
 		return b.sendWithThread(c, "⏳ Your request is already pending approval.", tele.ModeMarkdown)
 	}
 
-	// Add to pending requests
+	// Get chat and thread info for scope
+	chatID := c.Chat().ID
+	threadID := 0
+	if c.Message() != nil {
+		threadID = c.Message().ThreadID
+	} else if c.Callback() != nil && c.Callback().Message != nil {
+		threadID = c.Callback().Message.ThreadID
+	}
+
+	log.Printf("[handleRequestAccess] Request from chatID: %d, threadID: %d", chatID, threadID)
+
+	// Add to pending requests with scope info
 	req := storage.PendingRequest{
 		UserID:    userID,
 		Username:  c.Sender().Username,
 		FirstName: c.Sender().FirstName,
 		LastName:  c.Sender().LastName,
+		ChatID:    chatID,
+		ThreadID:  threadID,
 	}
+	log.Printf("[handleRequestAccess] Adding request to storage: %+v", req)
 
 	if err := b.pendingReqStorage.AddPendingRequest(req); err != nil {
+		log.Printf("[handleRequestAccess] ERROR: Failed to add pending request: %v", err)
 		return b.sendWithThread(c, fmt.Sprintf("❌ Error submitting request: %v", err), tele.ModeMarkdown)
 	}
+	log.Printf("[handleRequestAccess] Successfully added request to storage")
 
 	// Notify admins
+	log.Printf("[handleRequestAccess] Notifying admins...")
 	b.notifyAdminsOfRequest(req)
+	log.Printf("[handleRequestAccess] Admin notification completed")
 
 	return b.sendWithThread(c, "✅ Your access request has been submitted. You will be notified when it's reviewed.", tele.ModeMarkdown)
 }
 
+// escapeMarkdown escapes special Markdown characters for Telegram
+func escapeMarkdown(text string) string {
+	// Escape special MarkdownV2 characters: _ * [ ] ( ) ~ ` > # + - = | { } . !
+	replacer := strings.NewReplacer(
+		"_", "\\_",
+		"*", "\\*",
+		"[", "\\[",
+		"]", "\\]",
+		"(", "\\(",
+		")", "\\)",
+		"~", "\\~",
+		"`", "\\`",
+		">", "\\>",
+		"#", "\\#",
+		"+", "\\+",
+		"-", "\\-",
+		"=", "\\=",
+		"|", "\\|",
+		"{", "\\{",
+		"}", "\\}",
+		".", "\\.",
+		"!", "\\!",
+	)
+	return replacer.Replace(text)
+}
+
+// resendPendingRequestNotifications resends notifications for pending requests on startup
+func (b *Bot) resendPendingRequestNotifications() {
+	log.Printf("[resendPendingRequestNotifications] Checking for pending requests...")
+
+	if b.pendingReqStorage == nil {
+		log.Printf("[resendPendingRequestNotifications] WARNING: pendingReqStorage is nil")
+		return
+	}
+
+	requests, err := b.pendingReqStorage.GetPendingRequests()
+	if err != nil {
+		log.Printf("[resendPendingRequestNotifications] ERROR: Failed to get pending requests: %v", err)
+		return
+	}
+
+	if len(requests) == 0 {
+		log.Printf("[resendPendingRequestNotifications] No pending requests found")
+		return
+	}
+
+	log.Printf("[resendPendingRequestNotifications] Found %d pending request(s), resending notifications...", len(requests))
+
+	for _, req := range requests {
+		b.notifyAdminsOfRequest(req)
+	}
+
+	log.Printf("[resendPendingRequestNotifications] Finished resending notifications")
+}
+
 // notifyAdminsOfRequest notifies all admins of a new access request with approve/reject buttons
 func (b *Bot) notifyAdminsOfRequest(req storage.PendingRequest) {
-	userDesc := fmt.Sprintf("User ID: `%d`", req.UserID)
+	log.Printf("[notifyAdminsOfRequest] Notifying admins of request from user %d", req.UserID)
+	log.Printf("[notifyAdminsOfRequest] Number of admins: %d", len(b.allowedIDs))
+
+	if len(b.allowedIDs) == 0 {
+		log.Printf("[notifyAdminsOfRequest] WARNING: No admins configured to receive notifications")
+		return
+	}
+
+	// Build scope description
+	scopeDesc := "private chat"
+	if req.ThreadID != 0 {
+		scopeDesc = fmt.Sprintf("thread %d", req.ThreadID)
+	} else if req.ChatID < 0 {
+		scopeDesc = "group chat"
+	}
+
+	// Build message without Markdown in user-provided fields
+	var userDesc strings.Builder
+	userDesc.WriteString(fmt.Sprintf("User ID: %d", req.UserID))
 	if req.Username != "" {
-		userDesc += fmt.Sprintf("\nUsername: @%s", req.Username)
+		userDesc.WriteString(fmt.Sprintf("\nUsername: @%s", req.Username))
 	}
 	if req.FirstName != "" || req.LastName != "" {
-		userDesc += fmt.Sprintf("\nName: %s %s", req.FirstName, req.LastName)
+		userDesc.WriteString(fmt.Sprintf("\nName: %s %s", req.FirstName, req.LastName))
 	}
+	userDesc.WriteString(fmt.Sprintf("\n\n📍 Requested from: %s", scopeDesc))
 
 	message := fmt.Sprintf(
-		"📝 *New Access Request*\n\n%s\n\nPlease review this request:",
-		userDesc,
+		"📝 New Access Request\n\n%s\n\nPlease review this request:",
+		userDesc.String(),
 	)
 
-	// Create approve/reject buttons
-	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
+	// Create approve/reject buttons - use InlineKeyboard instead of ReplyMarkup
+	menu := &tele.ReplyMarkup{}
 	btnApprove := menu.Data("✅ Approve", "approve_request", strconv.FormatInt(req.UserID, 10))
 	btnReject := menu.Data("❌ Reject", "reject_request", strconv.FormatInt(req.UserID, 10))
 	menu.Inline(menu.Row(btnApprove, btnReject))
 
 	for adminID := range b.allowedIDs {
-		b.sendMessageWithMarkup(adminID, message, menu)
+		log.Printf("[notifyAdminsOfRequest] Sending notification to admin %d", adminID)
+		// Send directly to admin's private chat (explicitly no thread)
+		_, err := b.bot.Send(&tele.Chat{ID: adminID}, message, menu)
+		if err != nil {
+			log.Printf("[notifyAdminsOfRequest] Failed to notify admin %d: %v", adminID, err)
+		} else {
+			log.Printf("[notifyAdminsOfRequest] Successfully notified admin %d", adminID)
+		}
 	}
 }
 
@@ -1340,16 +1513,59 @@ func (b *Bot) handleApproveRequest(c tele.Context, userIDStr string) error {
 		return b.sendWithThread(c, "❌ Request system not configured.", tele.ModeMarkdown)
 	}
 
+	// Get the pending request to retrieve scope info
+	requests, _ := b.pendingReqStorage.GetPendingRequests()
+	var targetReq *storage.PendingRequest
+	for _, req := range requests {
+		if req.UserID == userID {
+			targetReq = &req
+			break
+		}
+	}
+
 	// Remove from pending
 	if err := b.pendingReqStorage.RemovePendingRequest(userID); err != nil {
 		return b.sendWithThread(c, fmt.Sprintf("❌ Error removing request: %v", err), tele.ModeMarkdown)
 	}
 
-	// Add to allowed IDs
+	// Add to allowed IDs (legacy)
 	b.allowedIDs[userID] = true
 
-	// Notify user
-	b.sendMessage(userID, "✅ *Access Approved*\n\nYour access request has been approved. You can now use the bot.")
+	// Add to scope-based storage if available
+	if b.allowedUserStorage != nil && targetReq != nil {
+		scope := storage.AccessScope{
+			ChatID:   targetReq.ChatID,
+			ThreadID: targetReq.ThreadID,
+		}
+		if err := b.allowedUserStorage.AddAllowedUser(userID, scope); err != nil {
+			log.Printf("[handleApproveRequest] Warning: failed to add user scope: %v", err)
+		}
+	}
+
+	// Notify user in the chat where they requested access
+	if targetReq != nil {
+		chatID := targetReq.ChatID
+		threadID := targetReq.ThreadID
+
+		// Build scope description
+		scopeDesc := "private chat"
+		if threadID != 0 {
+			scopeDesc = fmt.Sprintf("thread %d", threadID)
+		} else if chatID < 0 {
+			scopeDesc = "this group"
+		}
+
+		message := fmt.Sprintf("✅ *Access Approved*\n\nYour access request has been approved. You can now use the bot in %s.", scopeDesc)
+
+		if threadID != 0 {
+			b.sendMessageToThread(chatID, threadID, message)
+		} else {
+			b.sendMessage(chatID, message)
+		}
+	} else {
+		// Fallback to private message
+		b.sendMessage(userID, "✅ *Access Approved*\n\nYour access request has been approved. You can now use the bot.")
+	}
 
 	return b.sendWithThread(c, fmt.Sprintf("✅ User `%d` has been approved.", userID), tele.ModeMarkdown)
 }
@@ -1367,23 +1583,58 @@ func (b *Bot) handleAddUserCommand(c tele.Context) error {
 		return b.sendWithThread(c, "❌ Invalid user ID. Please provide a valid numeric user ID.", tele.ModeMarkdown)
 	}
 
-	// Check if already authorized
-	if b.isAuthorized(userID) {
+	// Get current chat/thread for scope
+	chatID := c.Chat().ID
+	threadID := 0
+	if c.Message() != nil {
+		threadID = c.Message().ThreadID
+	}
+
+	// Check if already authorized for this scope
+	if b.allowedUserStorage != nil {
+		if b.allowedUserStorage.IsUserAllowed(userID, chatID, threadID) {
+			return b.sendWithThread(c, fmt.Sprintf("ℹ️ User `%d` is already authorized for this scope.", userID), tele.ModeMarkdown)
+		}
+	} else if b.isAuthorized(userID) {
 		return b.sendWithThread(c, fmt.Sprintf("ℹ️ User `%d` is already authorized.", userID), tele.ModeMarkdown)
 	}
 
-	// Add to allowed IDs
+	// Add to allowed IDs (legacy)
 	b.allowedIDs[userID] = true
+
+	// Add to scope-based storage
+	if b.allowedUserStorage != nil {
+		scope := storage.AccessScope{
+			ChatID:   chatID,
+			ThreadID: threadID,
+		}
+		if err := b.allowedUserStorage.AddAllowedUser(userID, scope); err != nil {
+			log.Printf("[handleAddUserCommand] Warning: failed to add user scope: %v", err)
+		}
+	}
 
 	// Also remove from pending if exists
 	if b.pendingReqStorage != nil {
 		b.pendingReqStorage.RemovePendingRequest(userID)
 	}
 
-	// Notify the user
-	b.sendMessage(userID, "✅ *Access Approved*\n\nYou have been granted access to use the bot. Type /start to begin.")
+	// Build scope description
+	scopeDesc := "private chat"
+	if threadID != 0 {
+		scopeDesc = fmt.Sprintf("thread %d", threadID)
+	} else if chatID < 0 {
+		scopeDesc = "this group"
+	}
 
-	return b.sendWithThread(c, fmt.Sprintf("✅ User `%d` has been added and notified.", userID), tele.ModeMarkdown)
+	// Notify the user in the current chat/thread
+	message := fmt.Sprintf("✅ *Access Approved*\n\nYou have been granted access to use the bot in %s. Type /start to begin.", scopeDesc)
+	if threadID != 0 {
+		b.sendMessageToThread(chatID, threadID, message)
+	} else {
+		b.sendMessage(chatID, message)
+	}
+
+	return b.sendWithThread(c, fmt.Sprintf("✅ User `%d` has been added and notified for %s.", userID, scopeDesc), tele.ModeMarkdown)
 }
 
 // showPendingRequests shows all pending access requests to admin
@@ -1411,17 +1662,17 @@ func (b *Bot) showPendingRequests(c tele.Context) error {
 		}
 
 		message := fmt.Sprintf(
-			"📝 *Pending Access Request*\n\n%s\n\nPlease review this request:",
+			"📝 Pending Access Request\n\n%s\n\nPlease review this request:",
 			userDesc,
 		)
 
 		// Create approve/reject buttons
-		menu := &tele.ReplyMarkup{ResizeKeyboard: true}
+		menu := &tele.ReplyMarkup{}
 		btnApprove := menu.Data("✅ Approve", "approve_request", strconv.FormatInt(req.UserID, 10))
 		btnReject := menu.Data("❌ Reject", "reject_request", strconv.FormatInt(req.UserID, 10))
 		menu.Inline(menu.Row(btnApprove, btnReject))
 
-		b.sendWithThread(c, message, menu, tele.ModeMarkdown)
+		b.sendWithThread(c, message, menu)
 	}
 
 	return nil
@@ -1438,13 +1689,37 @@ func (b *Bot) handleRejectRequest(c tele.Context, userIDStr string) error {
 		return b.sendWithThread(c, "❌ Request system not configured.", tele.ModeMarkdown)
 	}
 
+	// Get the pending request to retrieve scope info before removing
+	requests, _ := b.pendingReqStorage.GetPendingRequests()
+	var targetReq *storage.PendingRequest
+	for _, req := range requests {
+		if req.UserID == userID {
+			targetReq = &req
+			break
+		}
+	}
+
 	// Remove from pending
 	if err := b.pendingReqStorage.RemovePendingRequest(userID); err != nil {
 		return b.sendWithThread(c, fmt.Sprintf("❌ Error removing request: %v", err), tele.ModeMarkdown)
 	}
 
-	// Notify user
-	b.sendMessage(userID, "❌ *Access Denied*\n\nYour access request has been rejected.")
+	// Notify user in the chat where they requested access
+	if targetReq != nil {
+		chatID := targetReq.ChatID
+		threadID := targetReq.ThreadID
+
+		message := "❌ *Access Denied*\n\nYour access request has been rejected."
+
+		if threadID != 0 {
+			b.sendMessageToThread(chatID, threadID, message)
+		} else {
+			b.sendMessage(chatID, message)
+		}
+	} else {
+		// Fallback to private message
+		b.sendMessage(userID, "❌ *Access Denied*\n\nYour access request has been rejected.")
+	}
 
 	return b.sendWithThread(c, fmt.Sprintf("❌ User `%d` has been rejected.", userID), tele.ModeMarkdown)
 }
@@ -1674,4 +1949,95 @@ func (b *Bot) handleEditProxiedSelected(c tele.Context, chatID int64, userID int
 		"✅ *Record Updated Successfully!*\n\nZone: `%s`\nType: `%s`\nName: `%s`\nContent: `%s`\nTTL: `%d`\nProxied: `%v`",
 		zone, recordType, name, content, ttl, proxied,
 	), menu, tele.ModeMarkdown)
+}
+
+// showAllowedUsers shows all allowed users with their scope information
+func (b *Bot) showAllowedUsers(c tele.Context) error {
+	if b.allowedUserStorage == nil {
+		return b.sendWithThread(c, "❌ User storage not configured.", tele.ModeMarkdown)
+	}
+
+	users, err := b.allowedUserStorage.GetAllowedUsers()
+	if err != nil {
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error getting allowed users: %v", err), tele.ModeMarkdown)
+	}
+
+	if len(users) == 0 {
+		return b.sendWithThread(c, "📭 No allowed users found.", tele.ModeMarkdown)
+	}
+
+	// Check if this is a private chat with admin
+	chatID := c.Chat().ID
+	isPrivateChat := chatID > 0
+
+	// Build user list message
+	var text strings.Builder
+	text.WriteString(fmt.Sprintf("*👥 Allowed Users (%d)*\n\n", len(users)))
+
+	for i, user := range users {
+		userDesc := fmt.Sprintf("*%d. User ID:* `%d`", i+1, user.UserID)
+
+		if len(user.Scopes) > 0 {
+			userDesc += "\n   *Scopes:*"
+			for j, scope := range user.Scopes {
+				chatType := "private"
+				if scope.ChatID < 0 {
+					chatType = "group"
+				}
+				if scope.ThreadID != 0 {
+					chatType = "thread"
+				}
+
+				scopeInfo := fmt.Sprintf("\n   %d.%d ChatID: `%d` (%s)", i+1, j+1, scope.ChatID, chatType)
+				if scope.ThreadID != 0 {
+					scopeInfo += fmt.Sprintf(" ThreadID: `%d`", scope.ThreadID)
+				}
+				userDesc += scopeInfo
+			}
+		}
+		text.WriteString(userDesc + "\n\n")
+	}
+
+	// Only show buttons in private chat with admin
+	if isPrivateChat {
+		menu := &tele.ReplyMarkup{ResizeKeyboard: true}
+		var rows []tele.Row
+
+		// Add a button for each user to remove them
+		for _, user := range users {
+			btnText := fmt.Sprintf("🗑️ Remove %d", user.UserID)
+			rows = append(rows, menu.Row(menu.Data(btnText, "remove_user", strconv.FormatInt(user.UserID, 10))))
+		}
+
+		rows = append(rows, menu.Row(menu.Data("🏠 Main Menu", "menu")))
+		menu.Inline(rows...)
+
+		return b.sendWithThread(c, text.String(), menu, tele.ModeMarkdown)
+	}
+
+	// In group/thread, just show the list without buttons
+	return b.sendWithThread(c, text.String(), tele.ModeMarkdown)
+}
+
+// handleRemoveUser handles removing a user from allowed list
+func (b *Bot) handleRemoveUser(c tele.Context, userIDStr string) error {
+	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	if err != nil {
+		return b.sendWithThread(c, "❌ Invalid user ID.", tele.ModeMarkdown)
+	}
+
+	if b.allowedUserStorage == nil {
+		return b.sendWithThread(c, "❌ User storage not configured.", tele.ModeMarkdown)
+	}
+
+	// Remove from allowed user storage
+	if err := b.allowedUserStorage.RemoveAllowedUser(userID); err != nil {
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error removing user: %v", err), tele.ModeMarkdown)
+	}
+
+	// Also remove from legacy allowed IDs
+	delete(b.allowedIDs, userID)
+
+	// Refresh the user list
+	return b.showAllowedUsers(c)
 }

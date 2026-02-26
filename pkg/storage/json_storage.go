@@ -28,6 +28,7 @@ type CombinedStorage interface {
 	APIKeyStorage
 	MCPHTTPConfigStorage
 	PendingRequestStorage
+	AllowedUserStorage
 }
 
 // NewJSONStorageWithAPIKeys creates a new JSON storage that implements all storage interfaces
@@ -270,4 +271,120 @@ func (s *jsonStorage) IsPendingRequest(userID int64) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// GetAllowedUsers returns all allowed users with their scopes
+func (s *jsonStorage) GetAllowedUsers() ([]AllowedUser, error) {
+	cfg, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+
+	// Migrate from old format if needed
+	if len(cfg.AllowedUsers) > 0 && len(cfg.AllowedUsersV2) == 0 {
+		users := make([]AllowedUser, 0, len(cfg.AllowedUsers))
+		for _, userID := range cfg.AllowedUsers {
+			users = append(users, AllowedUser{
+				UserID: userID,
+				Scopes: []AccessScope{
+					{ChatID: userID, ThreadID: 0}, // Default: private chat
+				},
+			})
+		}
+		return users, nil
+	}
+
+	return cfg.AllowedUsersV2, nil
+}
+
+// AddAllowedUser adds a user with a specific scope
+func (s *jsonStorage) AddAllowedUser(userID int64, scope AccessScope) error {
+	cfg, err := s.Load()
+	if err != nil {
+		return err
+	}
+
+	// Check if user already exists
+	for i, u := range cfg.AllowedUsersV2 {
+		if u.UserID == userID {
+			// Check if scope already exists
+			for _, existingScope := range u.Scopes {
+				if existingScope.ChatID == scope.ChatID && existingScope.ThreadID == scope.ThreadID {
+					return nil // Already has this scope
+				}
+			}
+			// Add new scope to existing user
+			cfg.AllowedUsersV2[i].Scopes = append(cfg.AllowedUsersV2[i].Scopes, scope)
+			return s.Save(cfg)
+		}
+	}
+
+	// Add new user with scope
+	cfg.AllowedUsersV2 = append(cfg.AllowedUsersV2, AllowedUser{
+		UserID: userID,
+		Scopes: []AccessScope{scope},
+	})
+
+	// Also add to old format for backward compatibility
+	cfg.AllowedUsers = append(cfg.AllowedUsers, userID)
+
+	return s.Save(cfg)
+}
+
+// RemoveAllowedUser removes a user from allowed list
+func (s *jsonStorage) RemoveAllowedUser(userID int64) error {
+	cfg, err := s.Load()
+	if err != nil {
+		return err
+	}
+
+	// Remove from V2
+	newUsersV2 := make([]AllowedUser, 0, len(cfg.AllowedUsersV2))
+	for _, u := range cfg.AllowedUsersV2 {
+		if u.UserID != userID {
+			newUsersV2 = append(newUsersV2, u)
+		}
+	}
+	cfg.AllowedUsersV2 = newUsersV2
+
+	// Remove from old format
+	newUsers := make([]int64, 0, len(cfg.AllowedUsers))
+	for _, id := range cfg.AllowedUsers {
+		if id != userID {
+			newUsers = append(newUsers, id)
+		}
+	}
+	cfg.AllowedUsers = newUsers
+
+	return s.Save(cfg)
+}
+
+// IsUserAllowed checks if a user is allowed in a specific chat/thread
+func (s *jsonStorage) IsUserAllowed(userID int64, chatID int64, threadID int) bool {
+	cfg, err := s.Load()
+	if err != nil {
+		return false
+	}
+
+	// Check old format (backward compatibility - allows all chats)
+	for _, id := range cfg.AllowedUsers {
+		if id == userID {
+			// Check if user has specific scope in V2
+			for _, u := range cfg.AllowedUsersV2 {
+				if u.UserID == userID {
+					// Check specific scope
+					for _, scope := range u.Scopes {
+						if scope.ChatID == chatID && scope.ThreadID == threadID {
+							return true
+						}
+					}
+					return false // User exists but doesn't have this scope
+				}
+			}
+			// User only in old format - allow (backward compatibility)
+			return true
+		}
+	}
+
+	return false
 }

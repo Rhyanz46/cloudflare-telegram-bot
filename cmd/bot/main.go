@@ -327,7 +327,8 @@ func main() {
 	mcpHTTPController := NewMCPHTTPServer(dnsUsecase, configStorage, configStorage)
 
 	// Initialize Telegram bot handler with all dependencies
-	botHandler := telegram.NewBot(dnsUsecase, cfg.TelegramBotToken, storageConfig.AllowedUsers, configStorage, configStorage, mcpHTTPController, configStorage)
+	// configStorage implements CombinedStorage which includes AllowedUserStorage
+	botHandler := telegram.NewBot(dnsUsecase, cfg.TelegramBotToken, storageConfig.AllowedUsers, configStorage, configStorage, mcpHTTPController, configStorage, configStorage)
 
 	// Start bot in a goroutine
 	go func() {
