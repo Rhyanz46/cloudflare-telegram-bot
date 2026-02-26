@@ -385,7 +385,7 @@ To use the MCP HTTP server with Claude Desktop, add this to your `claude_desktop
 {
   "mcpServers": {
     "cf-dns": {
-      "url": "http://localhost:8875/sse",
+      "url": "http://localhost:8875",
       "env": {
         "MCP_API_KEY": "your_api_key_from_telegram"
       }
@@ -399,7 +399,7 @@ To use the MCP HTTP server with Claude Desktop, add this to your `claude_desktop
 {
   "mcpServers": {
     "cf-dns": {
-      "url": "http://localhost:8875/sse",
+      "url": "http://localhost:8875",
       "env": {
         "MCP_API_KEY": "your_api_key_from_telegram"
       }
@@ -586,7 +586,7 @@ curl -X POST http://localhost:8875 \
    {
      "mcpServers": {
        "cf-dns": {
-         "url": "http://localhost:8875/sse",
+         "url": "http://localhost:8875",
          "env": {
            "MCP_API_KEY": "your_api_key_here"
          }
