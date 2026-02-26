@@ -239,9 +239,13 @@ func (b *Bot) handleTextMessage(c tele.Context) error {
 	chatID := c.Chat().ID
 	threadID := c.Message().ThreadID
 
+	// Debug logging
+	log.Printf("[handleTextMessage] UserID: %d, ChatID: %d, ThreadID: %d, Text: %s", userID, chatID, threadID, c.Text())
+
 	// Store thread ID in state
 	if threadID != 0 {
 		b.stateManager.SetData(userID, "thread_id", threadID)
+		log.Printf("[handleTextMessage] Stored thread_id %d for user %d", threadID, userID)
 	}
 
 	step := b.stateManager.GetCurrentStep(userID)
@@ -420,6 +424,35 @@ func (b *Bot) sendMessageToThread(chatID int64, threadID int, text string) error
 	return err
 }
 
+// getThreadIDFromContext extracts thread ID from context (message or callback)
+func (b *Bot) getThreadIDFromContext(c tele.Context) int {
+	if c.Message() != nil && c.Message().ThreadID != 0 {
+		return c.Message().ThreadID
+	}
+	if c.Callback() != nil && c.Callback().Message != nil && c.Callback().Message.ThreadID != 0 {
+		return c.Callback().Message.ThreadID
+	}
+	return 0
+}
+
+// sendWithThread sends a message with proper thread ID from context
+func (b *Bot) sendWithThread(c tele.Context, text string, opts ...interface{}) error {
+	threadID := b.getThreadIDFromContext(c)
+	if threadID != 0 {
+		opts = append(opts, &tele.SendOptions{ThreadID: threadID})
+	}
+	return c.Send(text, opts...)
+}
+
+// editWithThread edits a message with proper thread ID from context
+func (b *Bot) editWithThread(c tele.Context, text string, opts ...interface{}) error {
+	threadID := b.getThreadIDFromContext(c)
+	if threadID != 0 {
+		opts = append(opts, &tele.SendOptions{ThreadID: threadID})
+	}
+	return c.Edit(text, opts...)
+}
+
 // showMainMenu shows the main menu
 func (b *Bot) showMainMenu(c tele.Context) error {
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
@@ -427,7 +460,7 @@ func (b *Bot) showMainMenu(c tele.Context) error {
 	btnMCPHTTP := menu.Data("🌐 MCP HTTP Server", "mcphttp")
 	menu.Inline(menu.Row(btnManage), menu.Row(btnMCPHTTP))
 
-	return c.Send("*🏠 Main Menu*\n\nWhat would you like to do?", menu, tele.ModeMarkdown)
+	return b.sendWithThread(c, "*🏠 Main Menu*\n\nWhat would you like to do?", menu, tele.ModeMarkdown)
 }
 
 // showZones shows all zones
