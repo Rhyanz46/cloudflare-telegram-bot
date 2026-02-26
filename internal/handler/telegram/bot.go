@@ -168,6 +168,14 @@ func (b *Bot) setupHandlers() {
 		return b.showMainMenu(c)
 	})
 
+	b.bot.Handle("/requests", func(c tele.Context) error {
+		// Only admins can use this command
+		if !b.isAuthorized(c.Sender().ID) {
+			return c.Send("⛔ You are not authorized to use this command.", tele.ModeMarkdown)
+		}
+		return b.showPendingRequests(c)
+	})
+
 	// Callback handlers
 	b.bot.Handle(&tele.Btn{Unique: "menu"}, func(c tele.Context) error {
 		return b.showMainMenu(c)
@@ -1284,7 +1292,7 @@ func (b *Bot) handleRequestAccess(c tele.Context, userID int64) error {
 	return b.sendWithThread(c, "✅ Your access request has been submitted. You will be notified when it's reviewed.", tele.ModeMarkdown)
 }
 
-// notifyAdminsOfRequest notifies all admins of a new access request
+// notifyAdminsOfRequest notifies all admins of a new access request with approve/reject buttons
 func (b *Bot) notifyAdminsOfRequest(req storage.PendingRequest) {
 	userDesc := fmt.Sprintf("User ID: `%d`", req.UserID)
 	if req.Username != "" {
@@ -1295,12 +1303,18 @@ func (b *Bot) notifyAdminsOfRequest(req storage.PendingRequest) {
 	}
 
 	message := fmt.Sprintf(
-		"📝 *New Access Request*\n\n%s\n\nUse /requests to review pending requests.",
+		"📝 *New Access Request*\n\n%s\n\nPlease review this request:",
 		userDesc,
 	)
 
+	// Create approve/reject buttons
+	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
+	btnApprove := menu.Data("✅ Approve", "approve_request", strconv.FormatInt(req.UserID, 10))
+	btnReject := menu.Data("❌ Reject", "reject_request", strconv.FormatInt(req.UserID, 10))
+	menu.Inline(menu.Row(btnApprove, btnReject))
+
 	for adminID := range b.allowedIDs {
-		b.sendMessage(adminID, message)
+		b.sendMessageWithMarkup(adminID, message, menu)
 	}
 }
 
@@ -1327,6 +1341,47 @@ func (b *Bot) handleApproveRequest(c tele.Context, userIDStr string) error {
 	b.sendMessage(userID, "✅ *Access Approved*\n\nYour access request has been approved. You can now use the bot.")
 
 	return b.sendWithThread(c, fmt.Sprintf("✅ User `%d` has been approved.", userID), tele.ModeMarkdown)
+}
+
+// showPendingRequests shows all pending access requests to admin
+func (b *Bot) showPendingRequests(c tele.Context) error {
+	if b.pendingReqStorage == nil {
+		return b.sendWithThread(c, "❌ Request system not configured.", tele.ModeMarkdown)
+	}
+
+	requests, err := b.pendingReqStorage.GetPendingRequests()
+	if err != nil {
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error getting pending requests: %v", err), tele.ModeMarkdown)
+	}
+
+	if len(requests) == 0 {
+		return b.sendWithThread(c, "📭 No pending access requests.", tele.ModeMarkdown)
+	}
+
+	for _, req := range requests {
+		userDesc := fmt.Sprintf("User ID: `%d`", req.UserID)
+		if req.Username != "" {
+			userDesc += fmt.Sprintf("\nUsername: @%s", req.Username)
+		}
+		if req.FirstName != "" || req.LastName != "" {
+			userDesc += fmt.Sprintf("\nName: %s %s", req.FirstName, req.LastName)
+		}
+
+		message := fmt.Sprintf(
+			"📝 *Pending Access Request*\n\n%s\n\nPlease review this request:",
+			userDesc,
+		)
+
+		// Create approve/reject buttons
+		menu := &tele.ReplyMarkup{ResizeKeyboard: true}
+		btnApprove := menu.Data("✅ Approve", "approve_request", strconv.FormatInt(req.UserID, 10))
+		btnReject := menu.Data("❌ Reject", "reject_request", strconv.FormatInt(req.UserID, 10))
+		menu.Inline(menu.Row(btnApprove, btnReject))
+
+		b.sendWithThread(c, message, menu, tele.ModeMarkdown)
+	}
+
+	return nil
 }
 
 // handleRejectRequest rejects an access request
