@@ -298,14 +298,19 @@ func (b *Bot) handleCallback(c tele.Context) error {
 	messageID := c.Message().ID
 	threadID := c.Message().ThreadID
 
-	log.Printf("[Callback] UserID: %d, Data: %s, ThreadID: %d", userID, data, threadID)
+	log.Printf("[Callback] UserID: %d, Raw Data: %q, ThreadID: %d", userID, data, threadID)
 
 	// Answer callback
 	c.Respond()
 
-	// Parse callback data - telebot.v3 uses \x01 as separator
-	parts := strings.Split(data, "\x01")
+	// Strip the \f prefix that telebot.v3 adds to inline button callbacks
+	data = strings.TrimPrefix(data, "\f")
+	log.Printf("[Callback] After TrimPrefix: %q", data)
+
+	// Parse callback data - telebot.v3 uses | as separator
+	parts := strings.Split(data, "|")
 	action := parts[0]
+	log.Printf("[Callback] Action: %q, Parts: %v", action, parts)
 
 	switch action {
 	case "menu":
@@ -322,7 +327,7 @@ func (b *Bot) handleCallback(c tele.Context) error {
 		}
 	case "select_zone_manage":
 		if len(parts) > 1 {
-			zoneName := strings.Join(parts[1:], ":")
+			zoneName := parts[1]
 			return b.handleZoneSelectedForManage(c, chatID, userID, messageID, zoneName)
 		}
 	case "select_type":
@@ -360,7 +365,7 @@ func (b *Bot) handleCallback(c tele.Context) error {
 		}
 	case "create_in_zone":
 		if len(parts) >= 2 {
-			zoneName := strings.Join(parts[1:], ":")
+			zoneName := parts[1]
 			return b.handleCreateInZone(c, chatID, userID, zoneName)
 		}
 	case "mcphttp_start":
@@ -394,6 +399,29 @@ func (b *Bot) handleCallback(c tele.Context) error {
 	case "noop":
 		// Do nothing for pagination display button
 		return nil
+	case "edit_rec":
+		if len(parts) >= 4 {
+			return b.handleEditRecord(c, chatID, userID, messageID, parts[1], parts[2], parts[3])
+		}
+	case "delete_rec":
+		if len(parts) >= 4 {
+			return b.handleDeleteRecord(c, chatID, userID, messageID, parts[1], parts[2], parts[3])
+		}
+	case "back":
+		if len(parts) > 1 {
+			return b.handleBackNavigation(c, chatID, userID, messageID, parts[1])
+		}
+	case "cancel_edit":
+		b.stateManager.ClearState(userID)
+		return b.showMainMenu(c)
+	case "edit_ttl":
+		if len(parts) > 1 {
+			return b.handleEditRecordTTL(c, chatID, userID, messageID, parts[1])
+		}
+	case "edit_proxied":
+		if len(parts) > 1 {
+			return b.handleEditProxiedSelected(c, chatID, userID, messageID, parts[1] == "true")
+		}
 	}
 
 	return nil
@@ -1380,5 +1408,172 @@ func (b *Bot) handleEditRecordTTL(c tele.Context, chatID int64, userID int64, me
 	return b.sendWithThread(c, fmt.Sprintf(
 		"*✏️ Edit DNS Record - Proxy*\n\nZone: `%s`\nType: `%s`\nName: `%s`\nNew Content: `%s`\nNew TTL: `%d`\n\nEnable Cloudflare proxy?",
 		zone, recordType, name, content, ttl,
+	), menu, tele.ModeMarkdown)
+}
+
+// handleEditRecord starts the edit record flow
+func (b *Bot) handleEditRecord(c tele.Context, chatID int64, userID int64, messageID int, zoneName, pageStr, idxStr string) error {
+	page, _ := strconv.Atoi(pageStr)
+	idx, _ := strconv.Atoi(idxStr)
+
+	ctx := context.Background()
+	records, err := b.dnsUsecase.ListRecords(ctx, zoneName)
+	if err != nil {
+		return b.editWithThread(c, fmt.Sprintf("❌ Error loading records: %v", err), tele.ModeMarkdown)
+	}
+
+	recordsPerPage := 10
+	startIdx := page * recordsPerPage
+
+	if startIdx+idx >= len(records) {
+		return b.editWithThread(c, "❌ Record not found.", tele.ModeMarkdown)
+	}
+
+	r := records[startIdx+idx]
+
+	// Store record data in state
+	b.stateManager.SetData(userID, "edit_zone", zoneName)
+	b.stateManager.SetData(userID, "edit_type", r.Type)
+	b.stateManager.SetData(userID, "edit_name", r.Name)
+	b.stateManager.SetData(userID, "edit_record_id", r.ID)
+	b.stateManager.SetData(userID, "edit_page", page)
+	b.stateManager.SetData(userID, "edit_idx", idx)
+	b.stateManager.SetStep(userID, StepEditRecordContent)
+	b.stateManager.SetData(userID, "edit_message_id", messageID)
+
+	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
+	menu.Inline(
+		menu.Row(menu.Data("❌ Cancel", "cancel_edit")),
+	)
+
+	return b.editWithThread(c, fmt.Sprintf(
+		"*✏️ Edit DNS Record*\n\nZone: `%s`\nType: `%s`\nName: `%s`\nCurrent Content: `%s`\n\nEnter the new content:",
+		zoneName, r.Type, r.Name, r.Content,
+	), menu, tele.ModeMarkdown)
+}
+
+// handleDeleteRecord deletes a record
+func (b *Bot) handleDeleteRecord(c tele.Context, chatID int64, userID int64, messageID int, zoneName, pageStr, idxStr string) error {
+	page, _ := strconv.Atoi(pageStr)
+	idx, _ := strconv.Atoi(idxStr)
+
+	ctx := context.Background()
+	records, err := b.dnsUsecase.ListRecords(ctx, zoneName)
+	if err != nil {
+		return b.editWithThread(c, fmt.Sprintf("❌ Error loading records: %v", err), tele.ModeMarkdown)
+	}
+
+	recordsPerPage := 10
+	startIdx := page * recordsPerPage
+
+	if startIdx+idx >= len(records) {
+		return b.editWithThread(c, "❌ Record not found.", tele.ModeMarkdown)
+	}
+
+	r := records[startIdx+idx]
+
+	// Delete the record
+	err = b.dnsUsecase.DeleteRecord(ctx, zoneName, r.ID)
+	if err != nil {
+		return b.editWithThread(c, fmt.Sprintf("❌ Error deleting record: %v", err), tele.ModeMarkdown)
+	}
+
+	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
+	menu.Inline(
+		menu.Row(menu.Data("◀️ Back to List", "page", zoneName, pageStr)),
+		menu.Row(menu.Data("🏠 Main Menu", "menu")),
+	)
+
+	return b.editWithThread(c, fmt.Sprintf(
+		"✅ *Record Deleted*\n\nName: `%s`\nType: `%s`\nContent: `%s`",
+		r.Name, r.Type, r.Content,
+	), menu, tele.ModeMarkdown)
+}
+
+// handleBackNavigation handles back button navigation
+func (b *Bot) handleBackNavigation(c tele.Context, chatID int64, userID int64, messageID int, backTo string) error {
+	switch backTo {
+	case "create":
+		return b.startCreateRecord(c)
+	case "type":
+		zone, exists := b.stateManager.GetData(userID, "zone")
+		if exists {
+			return b.handleZoneSelectedForCreate(c, chatID, userID, messageID, zone.(string))
+		}
+		return b.startCreateRecord(c)
+	case "name":
+		return b.handleRecordTypeSelected(c, chatID, userID, messageID, b.getStateData(userID, "type"))
+	case "content":
+		return b.handleInputRecordName(c, chatID, userID, messageID, b.getStateData(userID, "name"))
+	case "ttl":
+		return b.handleInputRecordContent(c, chatID, userID, messageID, b.getStateData(userID, "content"))
+	case "edit_content":
+		// Go back to record details
+		zone := b.getStateData(userID, "edit_zone")
+		page := b.getStateData(userID, "edit_page")
+		idx := b.getStateData(userID, "edit_idx")
+		if zone != "" {
+			pageInt, _ := strconv.Atoi(page)
+			idxInt, _ := strconv.Atoi(idx)
+			return b.handleViewRecord(c, chatID, userID, messageID, zone, strconv.Itoa(pageInt), strconv.Itoa(idxInt))
+		}
+	}
+	return b.showMainMenu(c)
+}
+
+// getStateData safely gets state data
+func (b *Bot) getStateData(userID int64, key string) string {
+	val, exists := b.stateManager.GetData(userID, key)
+	if !exists {
+		return ""
+	}
+	switch v := val.(type) {
+	case string:
+		return v
+	case int:
+		return strconv.Itoa(v)
+	case bool:
+		return strconv.FormatBool(v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// handleEditProxiedSelected handles proxied selection for edit
+func (b *Bot) handleEditProxiedSelected(c tele.Context, chatID int64, userID int64, messageID int, proxied bool) error {
+	zone := b.getStateData(userID, "edit_zone")
+	recordType := b.getStateData(userID, "edit_type")
+	name := b.getStateData(userID, "edit_name")
+	content := b.getStateData(userID, "edit_content")
+	ttlStr := b.getStateData(userID, "edit_ttl")
+	recordID := b.getStateData(userID, "edit_record_id")
+
+	ttl, _ := strconv.Atoi(ttlStr)
+
+	ctx := context.Background()
+	input := usecase.UpdateRecordInput{
+		ZoneName: zone,
+		RecordID: recordID,
+		Content:  content,
+		TTL:      ttl,
+		Proxied:  proxied,
+	}
+
+	_, err := b.dnsUsecase.UpdateRecord(ctx, input)
+	if err != nil {
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error updating record: %v", err), tele.ModeMarkdown)
+	}
+
+	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
+	menu.Inline(
+		menu.Row(menu.Data("◀️ Back to List", "page", zone, b.getStateData(userID, "edit_page"))),
+		menu.Row(menu.Data("🏠 Main Menu", "menu")),
+	)
+
+	b.stateManager.ClearState(userID)
+
+	return b.sendWithThread(c, fmt.Sprintf(
+		"✅ *Record Updated Successfully!*\n\nZone: `%s`\nType: `%s`\nName: `%s`\nContent: `%s`\nTTL: `%d`\nProxied: `%v`",
+		zone, recordType, name, content, ttl, proxied,
 	), menu, tele.ModeMarkdown)
 }
