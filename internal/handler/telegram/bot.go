@@ -552,7 +552,7 @@ func (b *Bot) handleZoneSelectedForCreate(c tele.Context, chatID int64, userID i
 	rows = append(rows, menu.Row(menu.Data("❌ Cancel", "cancel_create")))
 	menu.Inline(rows...)
 
-	return c.Edit(fmt.Sprintf("*➕ Create DNS Record*\n\nZone: `%s`\n\nStep 2/6: Select record type:", zoneName), menu, tele.ModeMarkdown)
+	return b.editWithThread(c, fmt.Sprintf("*➕ Create DNS Record*\n\nZone: `%s`\n\nStep 2/6: Select record type:", zoneName), menu, tele.ModeMarkdown)
 }
 
 // handleRecordTypeSelected handles record type selection
@@ -568,7 +568,7 @@ func (b *Bot) handleRecordTypeSelected(c tele.Context, chatID int64, userID int6
 	zone, _ := b.stateManager.GetData(userID, "zone")
 	b.stateManager.SetData(userID, "create_message_id", messageID)
 
-	return c.Edit(fmt.Sprintf(
+	return b.editWithThread(c, fmt.Sprintf(
 		"*➕ Create DNS Record*\n\nZone: `%s`\nType: `%s`\n\nStep 3/6: Enter the record name (e.g., `www`, `api`, `@` for root):",
 		zone, recordType,
 	), menu, tele.ModeMarkdown)
@@ -587,7 +587,7 @@ func (b *Bot) handleInputRecordName(c tele.Context, chatID int64, userID int64, 
 	zone, _ := b.stateManager.GetData(userID, "zone")
 	recordType, _ := b.stateManager.GetData(userID, "type")
 
-	return c.Edit(fmt.Sprintf(
+	return b.editWithThread(c, fmt.Sprintf(
 		"*➕ Create DNS Record*\n\nZone: `%s`\nType: `%s`\nName: `%s`\n\nStep 4/6: Enter the content (IP for A/AAAA, domain for CNAME, etc.):",
 		zone, recordType, name,
 	), menu, tele.ModeMarkdown)
@@ -617,7 +617,7 @@ func (b *Bot) handleInputRecordContent(c tele.Context, chatID int64, userID int6
 	recordType, _ := b.stateManager.GetData(userID, "type")
 	name, _ := b.stateManager.GetData(userID, "name")
 
-	return c.Edit(fmt.Sprintf(
+	return b.editWithThread(c, fmt.Sprintf(
 		"*➕ Create DNS Record*\n\nZone: `%s`\nType: `%s`\nName: `%s`\nContent: `%s`\n\nStep 5/6: Select TTL:",
 		zone, recordType, name, content,
 	), menu, tele.ModeMarkdown)
@@ -643,7 +643,7 @@ func (b *Bot) handleTTLSelected(c tele.Context, chatID int64, userID int64, mess
 	name, _ := b.stateManager.GetData(userID, "name")
 	content, _ := b.stateManager.GetData(userID, "content")
 
-	return c.Edit(fmt.Sprintf(
+	return b.editWithThread(c, fmt.Sprintf(
 		"*➕ Create DNS Record*\n\nZone: `%s`\nType: `%s`\nName: `%s`\nContent: `%s`\nTTL: `%d`\n\nStep 6/6: Enable Cloudflare proxy?",
 		zone, recordType, name, content, ttl,
 	), menu, tele.ModeMarkdown)
@@ -671,7 +671,7 @@ func (b *Bot) handleProxiedSelected(c tele.Context, chatID int64, userID int64, 
 		menu.Row(menu.Data("❌ Cancel", "cancel_create")),
 	)
 
-	return c.Edit(fmt.Sprintf(
+	return b.editWithThread(c, fmt.Sprintf(
 		"*➕ Create DNS Record - Confirm*\n\nZone: `%s`\nType: `%s`\nName: `%s`\nContent: `%s`\nTTL: `%v`\nProxied: `%s`\n\nConfirm creation?",
 		zone, recordType, name, content, ttl, proxiedStr,
 	), menu, tele.ModeMarkdown)
@@ -700,9 +700,9 @@ func (b *Bot) handleConfirmCreate(c tele.Context, chatID int64, userID int64, me
 	record, err := b.dnsUsecase.CreateRecord(ctx, input)
 	if err != nil {
 		if err == domain.ErrDuplicateRecord {
-			return c.Edit(fmt.Sprintf("❌ Record `%s` already exists. Use *Manage Records* to update it.", name.(string)), tele.ModeMarkdown)
+			return b.editWithThread(c, fmt.Sprintf("❌ Record `%s` already exists. Use *Manage Records* to update it.", name.(string)), tele.ModeMarkdown)
 		}
-		return c.Edit(fmt.Sprintf("❌ Error creating record: %v", err), tele.ModeMarkdown)
+		return b.editWithThread(c, fmt.Sprintf("❌ Error creating record: %v", err), tele.ModeMarkdown)
 	}
 
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
@@ -712,7 +712,7 @@ func (b *Bot) handleConfirmCreate(c tele.Context, chatID int64, userID int64, me
 
 	b.stateManager.ClearState(userID)
 
-	return c.Edit(fmt.Sprintf(
+	return b.editWithThread(c, fmt.Sprintf(
 		"✅ *Record Created Successfully!*\n\nName: `%s`\nType: `%s`\nContent: `%s`\nTTL: `%d`\nProxied: `%v`",
 		record.Name, record.Type, record.Content, record.TTL, record.Proxied,
 	), menu, tele.ModeMarkdown)
@@ -723,11 +723,11 @@ func (b *Bot) startManageRecords(c tele.Context) error {
 	ctx := context.Background()
 	zones, err := b.dnsUsecase.ListZones(ctx)
 	if err != nil {
-		return c.Send(fmt.Sprintf("❌ Error: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error: %v", err), tele.ModeMarkdown)
 	}
 
 	if len(zones) == 0 {
-		return c.Send("📭 No zones found.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "📭 No zones found.", tele.ModeMarkdown)
 	}
 
 	userID := c.Sender().ID
@@ -748,7 +748,7 @@ func (b *Bot) startManageRecords(c tele.Context) error {
 	rows = append(rows, menu.Row(menu.Data("◀️ Back to Menu", "menu")))
 	menu.Inline(rows...)
 
-	return c.Send("*🔍 Manage Records*\n\nSelect a zone:", menu, tele.ModeMarkdown)
+	return b.sendWithThread(c, "*🔍 Manage Records*\n\nSelect a zone:", menu, tele.ModeMarkdown)
 }
 
 // handleZoneSelectedForManage handles zone selection for manage
@@ -761,7 +761,7 @@ func (b *Bot) refreshZoneRecords(c tele.Context, chatID int64, userID int64, mes
 	ctx := context.Background()
 	records, err := b.dnsUsecase.ListRecords(ctx, zoneName)
 	if err != nil {
-		return c.Edit(fmt.Sprintf("❌ Error loading records: %v", err), tele.ModeMarkdown)
+		return b.editWithThread(c, fmt.Sprintf("❌ Error loading records: %v", err), tele.ModeMarkdown)
 	}
 
 	if len(records) == 0 {
@@ -769,7 +769,7 @@ func (b *Bot) refreshZoneRecords(c tele.Context, chatID int64, userID int64, mes
 		menu.Inline(
 			menu.Row(menu.Data("➕ Create Record", "create_in_zone", zoneName), menu.Data("◀️ Back", "manage")),
 		)
-		return c.Edit(fmt.Sprintf("📭 No records found in `%s`.", zoneName), menu, tele.ModeMarkdown)
+		return b.editWithThread(c, fmt.Sprintf("📭 No records found in `%s`.", zoneName), menu, tele.ModeMarkdown)
 	}
 
 	// Pagination settings
@@ -826,14 +826,14 @@ func (b *Bot) refreshZoneRecords(c tele.Context, chatID int64, userID int64, mes
 	rows = append(rows, menu.Row(menu.Data("◀️ Back", "manage"), menu.Data("🏠 Menu", "menu")))
 
 	menu.Inline(rows...)
-	return c.Edit(text.String(), menu, tele.ModeMarkdown)
+	return b.editWithThread(c, text.String(), menu, tele.ModeMarkdown)
 }
 
 // handleInputRecordTTL handles custom TTL input
 func (b *Bot) handleInputRecordTTL(c tele.Context, chatID int64, userID int64, ttlStr string) error {
 	ttl, err := strconv.Atoi(ttlStr)
 	if err != nil {
-		return c.Send("❌ Invalid TTL. Please enter a number.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ Invalid TTL. Please enter a number.", tele.ModeMarkdown)
 	}
 
 	b.stateManager.SetData(userID, "ttl", ttl)
@@ -853,7 +853,7 @@ func (b *Bot) handleInputRecordTTL(c tele.Context, chatID int64, userID int64, t
 	name, _ := b.stateManager.GetData(userID, "name")
 	content, _ := b.stateManager.GetData(userID, "content")
 
-	return c.Send(fmt.Sprintf(
+	return b.sendWithThread(c, fmt.Sprintf(
 		"*➕ Create DNS Record*\n\nZone: `%s`\nType: `%s`\nName: `%s`\nContent: `%s`\nTTL: `%d`\n\nStep 6/6: Enable Cloudflare proxy?",
 		zone, recordType, name, content, ttl,
 	), menu, tele.ModeMarkdown)
@@ -862,7 +862,7 @@ func (b *Bot) handleInputRecordTTL(c tele.Context, chatID int64, userID int64, t
 // showMCPHTTPMenu shows the MCP HTTP server management menu
 func (b *Bot) showMCPHTTPMenu(c tele.Context) error {
 	if b.mcpHTTPController == nil {
-		return c.Send("❌ MCP HTTP server controller not configured.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ MCP HTTP server controller not configured.", tele.ModeMarkdown)
 	}
 
 	status := "🔴 Stopped"
@@ -888,7 +888,7 @@ func (b *Bot) showMCPHTTPMenu(c tele.Context) error {
 		)
 	}
 
-	return c.Send(fmt.Sprintf(
+	return b.sendWithThread(c, fmt.Sprintf(
 		"*🌐 MCP HTTP Server Management*\n\nStatus: %s\nPort: `%s`\n\nWhat would you like to do?",
 		status, port,
 	), menu, tele.ModeMarkdown)
@@ -904,18 +904,18 @@ func (b *Bot) showAPIKeysMenu(c tele.Context) error {
 		menu.Row(menu.Data("◀️ Back to MCP HTTP Server", "mcphttp")),
 	)
 
-	return c.Send("*🔑 MCP API Key Management*\n\nManage API keys for MCP server access:", menu, tele.ModeMarkdown)
+	return b.sendWithThread(c, "*🔑 MCP API Key Management*\n\nManage API keys for MCP server access:", menu, tele.ModeMarkdown)
 }
 
 // handleMCPHTTPPortChange handles the port change input
 func (b *Bot) handleMCPHTTPPortChange(c tele.Context, chatID int64, userID int64, portStr string) error {
 	if b.configStorage == nil || b.mcpHTTPController == nil {
-		return c.Send("❌ Configuration not available.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ Configuration not available.", tele.ModeMarkdown)
 	}
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
-		return c.Send("❌ Invalid port number. Please enter a number between 1 and 65535.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ Invalid port number. Please enter a number between 1 and 65535.", tele.ModeMarkdown)
 	}
 
 	b.stateManager.SetData(userID, "new_port", portStr)
@@ -924,17 +924,17 @@ func (b *Bot) handleMCPHTTPPortChange(c tele.Context, chatID int64, userID int64
 
 	if wasRunning {
 		if err := b.mcpHTTPController.Stop(); err != nil {
-			return c.Send(fmt.Sprintf("❌ Error stopping server: %v", err), tele.ModeMarkdown)
+			return b.sendWithThread(c, fmt.Sprintf("❌ Error stopping server: %v", err), tele.ModeMarkdown)
 		}
 	}
 
 	if err := b.configStorage.SetMCPHTTPPort(portStr); err != nil {
-		return c.Send(fmt.Sprintf("❌ Error saving port: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error saving port: %v", err), tele.ModeMarkdown)
 	}
 
 	if wasRunning {
 		if err := b.mcpHTTPController.Start(); err != nil {
-			return c.Send(fmt.Sprintf("❌ Error restarting server with new port: %v", err), tele.ModeMarkdown)
+			return b.sendWithThread(c, fmt.Sprintf("❌ Error restarting server with new port: %v", err), tele.ModeMarkdown)
 		}
 	}
 
@@ -951,7 +951,7 @@ func (b *Bot) handleMCPHTTPPortChange(c tele.Context, chatID int64, userID int64
 		statusMsg = "Server restarted with new port."
 	}
 
-	return c.Send(fmt.Sprintf(
+	return b.sendWithThread(c, fmt.Sprintf(
 		"✅ *Port Changed!*\n\nNew port: `%s`\n%s",
 		portStr, statusMsg,
 	), menu, tele.ModeMarkdown)
@@ -981,14 +981,14 @@ func (b *Bot) handleViewRecord(c tele.Context, chatID int64, userID int64, messa
 	ctx := context.Background()
 	records, err := b.dnsUsecase.ListRecords(ctx, zoneName)
 	if err != nil {
-		return c.Edit(fmt.Sprintf("❌ Error loading records: %v", err), tele.ModeMarkdown)
+		return b.editWithThread(c, fmt.Sprintf("❌ Error loading records: %v", err), tele.ModeMarkdown)
 	}
 
 	recordsPerPage := 10
 	startIdx := page * recordsPerPage
 
 	if startIdx+idx >= len(records) {
-		return c.Edit("❌ Record not found.", tele.ModeMarkdown)
+		return b.editWithThread(c, "❌ Record not found.", tele.ModeMarkdown)
 	}
 
 	r := records[startIdx+idx]
@@ -1005,7 +1005,7 @@ func (b *Bot) handleViewRecord(c tele.Context, chatID int64, userID int64, messa
 		proxiedStr = "✅ Yes"
 	}
 
-	return c.Edit(fmt.Sprintf(
+	return b.editWithThread(c, fmt.Sprintf(
 		"*📄 Record Details*\n\nZone: `%s`\nName: `%s`\nType: `%s`\nContent: `%s`\nTTL: `%d`\nProxied: `%s`\nRecord ID: `%s`",
 		zoneName, r.Name, r.Type, r.Content, r.TTL, proxiedStr, r.ID,
 	), menu, tele.ModeMarkdown)
@@ -1036,17 +1036,17 @@ func (b *Bot) handleCreateInZone(c tele.Context, chatID int64, userID int64, zon
 	rows = append(rows, menu.Row(menu.Data("❌ Cancel", "cancel_create")))
 	menu.Inline(rows...)
 
-	return c.Send(fmt.Sprintf("*➕ Create DNS Record*\n\nZone: `%s`\n\nStep 2/6: Select record type:", zoneName), menu, tele.ModeMarkdown)
+	return b.sendWithThread(c, fmt.Sprintf("*➕ Create DNS Record*\n\nZone: `%s`\n\nStep 2/6: Select record type:", zoneName), menu, tele.ModeMarkdown)
 }
 
 // handleMCPHTTPStart starts the MCP HTTP server
 func (b *Bot) handleMCPHTTPStart(c tele.Context) error {
 	if b.mcpHTTPController == nil {
-		return c.Send("❌ MCP HTTP server controller not configured.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ MCP HTTP server controller not configured.", tele.ModeMarkdown)
 	}
 
 	if err := b.mcpHTTPController.Start(); err != nil {
-		return c.Send(fmt.Sprintf("❌ Error starting server: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error starting server: %v", err), tele.ModeMarkdown)
 	}
 
 	return b.showMCPHTTPMenu(c)
@@ -1055,11 +1055,11 @@ func (b *Bot) handleMCPHTTPStart(c tele.Context) error {
 // handleMCPHTTPStop stops the MCP HTTP server
 func (b *Bot) handleMCPHTTPStop(c tele.Context) error {
 	if b.mcpHTTPController == nil {
-		return c.Send("❌ MCP HTTP server controller not configured.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ MCP HTTP server controller not configured.", tele.ModeMarkdown)
 	}
 
 	if err := b.mcpHTTPController.Stop(); err != nil {
-		return c.Send(fmt.Sprintf("❌ Error stopping server: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error stopping server: %v", err), tele.ModeMarkdown)
 	}
 
 	return b.showMCPHTTPMenu(c)
@@ -1072,13 +1072,13 @@ func (b *Bot) handleMCPHTTPPortInput(c tele.Context, userID int64) error {
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
 	menu.Inline(menu.Row(menu.Data("❌ Cancel", "mcphttp")))
 
-	return c.Send("🔢 *Change Port*\n\nEnter the new port number (1-65535):", menu, tele.ModeMarkdown)
+	return b.sendWithThread(c, "🔢 *Change Port*\n\nEnter the new port number (1-65535):", menu, tele.ModeMarkdown)
 }
 
 // handleMCPHTTPStatus shows MCP HTTP server status
 func (b *Bot) handleMCPHTTPStatus(c tele.Context) error {
 	if b.mcpHTTPController == nil {
-		return c.Send("❌ MCP HTTP server controller not configured.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ MCP HTTP server controller not configured.", tele.ModeMarkdown)
 	}
 
 	status := "🔴 Stopped"
@@ -1090,7 +1090,7 @@ func (b *Bot) handleMCPHTTPStatus(c tele.Context) error {
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
 	menu.Inline(menu.Row(menu.Data("◀️ Back", "mcphttp")))
 
-	return c.Send(fmt.Sprintf(
+	return b.sendWithThread(c, fmt.Sprintf(
 		"*📊 MCP HTTP Server Status*\n\nStatus: %s\nPort: `%s`",
 		status, port,
 	), menu, tele.ModeMarkdown)
@@ -1099,16 +1099,16 @@ func (b *Bot) handleMCPHTTPStatus(c tele.Context) error {
 // handleAPIKeyGenerate generates a new API key
 func (b *Bot) handleAPIKeyGenerate(c tele.Context) error {
 	if b.apiKeyStorage == nil {
-		return c.Send("❌ API key storage not configured.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ API key storage not configured.", tele.ModeMarkdown)
 	}
 
 	key, err := b.generateRandomKey()
 	if err != nil {
-		return c.Send(fmt.Sprintf("❌ Error generating key: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error generating key: %v", err), tele.ModeMarkdown)
 	}
 
 	if err := b.apiKeyStorage.AddAPIKey(key); err != nil {
-		return c.Send(fmt.Sprintf("❌ Error saving key: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error saving key: %v", err), tele.ModeMarkdown)
 	}
 
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
@@ -1118,7 +1118,7 @@ func (b *Bot) handleAPIKeyGenerate(c tele.Context) error {
 		menu.Row(menu.Data("◀️ Back", "apikeys")),
 	)
 
-	return c.Send(fmt.Sprintf(
+	return b.sendWithThread(c, fmt.Sprintf(
 		"✅ *API Key Generated!*\n\nKey: `%s`\n\n⚠️ *Important:* Copy this key now. It will not be shown again.",
 		key,
 	), menu, tele.ModeMarkdown)
@@ -1127,12 +1127,12 @@ func (b *Bot) handleAPIKeyGenerate(c tele.Context) error {
 // handleAPIKeyList lists all API keys
 func (b *Bot) handleAPIKeyList(c tele.Context) error {
 	if b.apiKeyStorage == nil {
-		return c.Send("❌ API key storage not configured.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ API key storage not configured.", tele.ModeMarkdown)
 	}
 
 	keys, err := b.apiKeyStorage.GetAPIKeys()
 	if err != nil {
-		return c.Send(fmt.Sprintf("❌ Error getting keys: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error getting keys: %v", err), tele.ModeMarkdown)
 	}
 
 	if len(keys) == 0 {
@@ -1141,7 +1141,7 @@ func (b *Bot) handleAPIKeyList(c tele.Context) error {
 			menu.Row(menu.Data("➕ Generate Key", "apikey_generate")),
 			menu.Row(menu.Data("◀️ Back", "apikeys")),
 		)
-		return c.Send("📭 No API keys found.", menu, tele.ModeMarkdown)
+		return b.sendWithThread(c, "📭 No API keys found.", menu, tele.ModeMarkdown)
 	}
 
 	var text strings.Builder
@@ -1156,18 +1156,18 @@ func (b *Bot) handleAPIKeyList(c tele.Context) error {
 		menu.Row(menu.Data("◀️ Back", "apikeys")),
 	)
 
-	return c.Send(text.String(), menu, tele.ModeMarkdown)
+	return b.sendWithThread(c, text.String(), menu, tele.ModeMarkdown)
 }
 
 // handleAPIKeyDeleteMenu shows the delete key menu
 func (b *Bot) handleAPIKeyDeleteMenu(c tele.Context) error {
 	if b.apiKeyStorage == nil {
-		return c.Send("❌ API key storage not configured.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ API key storage not configured.", tele.ModeMarkdown)
 	}
 
 	keys, err := b.apiKeyStorage.GetAPIKeys()
 	if err != nil {
-		return c.Send(fmt.Sprintf("❌ Error getting keys: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error getting keys: %v", err), tele.ModeMarkdown)
 	}
 
 	if len(keys) == 0 {
@@ -1176,7 +1176,7 @@ func (b *Bot) handleAPIKeyDeleteMenu(c tele.Context) error {
 			menu.Row(menu.Data("➕ Generate Key", "apikey_generate")),
 			menu.Row(menu.Data("◀️ Back", "apikeys")),
 		)
-		return c.Send("📭 No API keys to delete.", menu, tele.ModeMarkdown)
+		return b.sendWithThread(c, "📭 No API keys to delete.", menu, tele.ModeMarkdown)
 	}
 
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
@@ -1187,32 +1187,32 @@ func (b *Bot) handleAPIKeyDeleteMenu(c tele.Context) error {
 	rows = append(rows, menu.Row(menu.Data("◀️ Back", "apikeys")))
 	menu.Inline(rows...)
 
-	return c.Send("*🗑️ Delete API Key*\n\nSelect a key to delete:", menu, tele.ModeMarkdown)
+	return b.sendWithThread(c, "*🗑️ Delete API Key*\n\nSelect a key to delete:", menu, tele.ModeMarkdown)
 }
 
 // handleAPIKeyDelete deletes a specific API key
 func (b *Bot) handleAPIKeyDelete(c tele.Context, keyIdxStr string) error {
 	if b.apiKeyStorage == nil {
-		return c.Send("❌ API key storage not configured.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ API key storage not configured.", tele.ModeMarkdown)
 	}
 
 	keyIdx, err := strconv.Atoi(keyIdxStr)
 	if err != nil {
-		return c.Send("❌ Invalid key index.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ Invalid key index.", tele.ModeMarkdown)
 	}
 
 	keys, err := b.apiKeyStorage.GetAPIKeys()
 	if err != nil {
-		return c.Send(fmt.Sprintf("❌ Error getting keys: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error getting keys: %v", err), tele.ModeMarkdown)
 	}
 
 	if keyIdx < 0 || keyIdx >= len(keys) {
-		return c.Send("❌ Invalid key index.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ Invalid key index.", tele.ModeMarkdown)
 	}
 
 	key := keys[keyIdx]
 	if err := b.apiKeyStorage.RemoveAPIKey(key); err != nil {
-		return c.Send(fmt.Sprintf("❌ Error deleting key: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error deleting key: %v", err), tele.ModeMarkdown)
 	}
 
 	menu := &tele.ReplyMarkup{ResizeKeyboard: true}
@@ -1221,19 +1221,19 @@ func (b *Bot) handleAPIKeyDelete(c tele.Context, keyIdxStr string) error {
 		menu.Row(menu.Data("◀️ Back", "apikeys")),
 	)
 
-	return c.Send(fmt.Sprintf("✅ Key `%s` deleted.", b.maskAPIKey(key)), menu, tele.ModeMarkdown)
+	return b.sendWithThread(c, fmt.Sprintf("✅ Key `%s` deleted.", b.maskAPIKey(key)), menu, tele.ModeMarkdown)
 }
 
 // handleRequestAccess handles access requests from unauthorized users
 func (b *Bot) handleRequestAccess(c tele.Context, userID int64) error {
 	if b.pendingReqStorage == nil {
-		return c.Send("❌ Request system not configured.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ Request system not configured.", tele.ModeMarkdown)
 	}
 
 	// Check if already pending
 	isPending, _ := b.pendingReqStorage.IsPendingRequest(userID)
 	if isPending {
-		return c.Send("⏳ Your request is already pending approval.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "⏳ Your request is already pending approval.", tele.ModeMarkdown)
 	}
 
 	// Add to pending requests
@@ -1245,13 +1245,13 @@ func (b *Bot) handleRequestAccess(c tele.Context, userID int64) error {
 	}
 
 	if err := b.pendingReqStorage.AddPendingRequest(req); err != nil {
-		return c.Send(fmt.Sprintf("❌ Error submitting request: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error submitting request: %v", err), tele.ModeMarkdown)
 	}
 
 	// Notify admins
 	b.notifyAdminsOfRequest(req)
 
-	return c.Send("✅ Your access request has been submitted. You will be notified when it's reviewed.", tele.ModeMarkdown)
+	return b.sendWithThread(c, "✅ Your access request has been submitted. You will be notified when it's reviewed.", tele.ModeMarkdown)
 }
 
 // notifyAdminsOfRequest notifies all admins of a new access request
@@ -1278,16 +1278,16 @@ func (b *Bot) notifyAdminsOfRequest(req storage.PendingRequest) {
 func (b *Bot) handleApproveRequest(c tele.Context, userIDStr string) error {
 	userID, err := strconv.ParseInt(userIDStr, 10, 64)
 	if err != nil {
-		return c.Send("❌ Invalid user ID.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ Invalid user ID.", tele.ModeMarkdown)
 	}
 
 	if b.pendingReqStorage == nil {
-		return c.Send("❌ Request system not configured.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ Request system not configured.", tele.ModeMarkdown)
 	}
 
 	// Remove from pending
 	if err := b.pendingReqStorage.RemovePendingRequest(userID); err != nil {
-		return c.Send(fmt.Sprintf("❌ Error removing request: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error removing request: %v", err), tele.ModeMarkdown)
 	}
 
 	// Add to allowed IDs
@@ -1296,29 +1296,29 @@ func (b *Bot) handleApproveRequest(c tele.Context, userIDStr string) error {
 	// Notify user
 	b.sendMessage(userID, "✅ *Access Approved*\n\nYour access request has been approved. You can now use the bot.")
 
-	return c.Send(fmt.Sprintf("✅ User `%d` has been approved.", userID), tele.ModeMarkdown)
+	return b.sendWithThread(c, fmt.Sprintf("✅ User `%d` has been approved.", userID), tele.ModeMarkdown)
 }
 
 // handleRejectRequest rejects an access request
 func (b *Bot) handleRejectRequest(c tele.Context, userIDStr string) error {
 	userID, err := strconv.ParseInt(userIDStr, 10, 64)
 	if err != nil {
-		return c.Send("❌ Invalid user ID.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ Invalid user ID.", tele.ModeMarkdown)
 	}
 
 	if b.pendingReqStorage == nil {
-		return c.Send("❌ Request system not configured.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ Request system not configured.", tele.ModeMarkdown)
 	}
 
 	// Remove from pending
 	if err := b.pendingReqStorage.RemovePendingRequest(userID); err != nil {
-		return c.Send(fmt.Sprintf("❌ Error removing request: %v", err), tele.ModeMarkdown)
+		return b.sendWithThread(c, fmt.Sprintf("❌ Error removing request: %v", err), tele.ModeMarkdown)
 	}
 
 	// Notify user
 	b.sendMessage(userID, "❌ *Access Denied*\n\nYour access request has been rejected.")
 
-	return c.Send(fmt.Sprintf("❌ User `%d` has been rejected.", userID), tele.ModeMarkdown)
+	return b.sendWithThread(c, fmt.Sprintf("❌ User `%d` has been rejected.", userID), tele.ModeMarkdown)
 }
 
 // handleEditRecordContent handles editing record content
@@ -1345,7 +1345,7 @@ func (b *Bot) handleEditRecordContent(c tele.Context, chatID int64, userID int64
 	recordType, _ := b.stateManager.GetData(userID, "edit_type")
 	name, _ := b.stateManager.GetData(userID, "edit_name")
 
-	return c.Edit(fmt.Sprintf(
+	return b.editWithThread(c, fmt.Sprintf(
 		"*✏️ Edit DNS Record - TTL*\n\nZone: `%s`\nType: `%s`\nName: `%s`\nNew Content: `%s`\n\nSelect new TTL:",
 		zone, recordType, name, content,
 	), menu, tele.ModeMarkdown)
@@ -1355,7 +1355,7 @@ func (b *Bot) handleEditRecordContent(c tele.Context, chatID int64, userID int64
 func (b *Bot) handleEditRecordTTL(c tele.Context, chatID int64, userID int64, messageID int, ttlStr string) error {
 	ttl, err := strconv.Atoi(ttlStr)
 	if err != nil {
-		return c.Send("❌ Invalid TTL. Please enter a number.", tele.ModeMarkdown)
+		return b.sendWithThread(c, "❌ Invalid TTL. Please enter a number.", tele.ModeMarkdown)
 	}
 
 	b.stateManager.SetData(userID, "edit_ttl", ttl)
@@ -1375,7 +1375,7 @@ func (b *Bot) handleEditRecordTTL(c tele.Context, chatID int64, userID int64, me
 	name, _ := b.stateManager.GetData(userID, "edit_name")
 	content, _ := b.stateManager.GetData(userID, "edit_content")
 
-	return c.Send(fmt.Sprintf(
+	return b.sendWithThread(c, fmt.Sprintf(
 		"*✏️ Edit DNS Record - Proxy*\n\nZone: `%s`\nType: `%s`\nName: `%s`\nNew Content: `%s`\nNew TTL: `%d`\n\nEnable Cloudflare proxy?",
 		zone, recordType, name, content, ttl,
 	), menu, tele.ModeMarkdown)
