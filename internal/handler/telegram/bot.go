@@ -176,6 +176,14 @@ func (b *Bot) setupHandlers() {
 		return b.showPendingRequests(c)
 	})
 
+	b.bot.Handle("/adduser", func(c tele.Context) error {
+		// Only admins can use this command
+		if !b.isAuthorized(c.Sender().ID) {
+			return c.Send("⛔ You are not authorized to use this command.", tele.ModeMarkdown)
+		}
+		return b.handleAddUserCommand(c)
+	})
+
 	// Callback handlers
 	b.bot.Handle(&tele.Btn{Unique: "menu"}, func(c tele.Context) error {
 		return b.showMainMenu(c)
@@ -1341,6 +1349,38 @@ func (b *Bot) handleApproveRequest(c tele.Context, userIDStr string) error {
 	b.sendMessage(userID, "✅ *Access Approved*\n\nYour access request has been approved. You can now use the bot.")
 
 	return b.sendWithThread(c, fmt.Sprintf("✅ User `%d` has been approved.", userID), tele.ModeMarkdown)
+}
+
+// handleAddUserCommand handles the /adduser command for admin to add users directly
+func (b *Bot) handleAddUserCommand(c tele.Context) error {
+	args := c.Args()
+	if len(args) == 0 {
+		return b.sendWithThread(c, "ℹ️ Usage: `/adduser <user_id>`\n\nExample: `/adduser 123456789`", tele.ModeMarkdown)
+	}
+
+	userIDStr := args[0]
+	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	if err != nil {
+		return b.sendWithThread(c, "❌ Invalid user ID. Please provide a valid numeric user ID.", tele.ModeMarkdown)
+	}
+
+	// Check if already authorized
+	if b.isAuthorized(userID) {
+		return b.sendWithThread(c, fmt.Sprintf("ℹ️ User `%d` is already authorized.", userID), tele.ModeMarkdown)
+	}
+
+	// Add to allowed IDs
+	b.allowedIDs[userID] = true
+
+	// Also remove from pending if exists
+	if b.pendingReqStorage != nil {
+		b.pendingReqStorage.RemovePendingRequest(userID)
+	}
+
+	// Notify the user
+	b.sendMessage(userID, "✅ *Access Approved*\n\nYou have been granted access to use the bot. Type /start to begin.")
+
+	return b.sendWithThread(c, fmt.Sprintf("✅ User `%d` has been added and notified.", userID), tele.ModeMarkdown)
 }
 
 // showPendingRequests shows all pending access requests to admin
