@@ -211,12 +211,16 @@ func (b *Bot) notifyAdminOnStartup() {
 func (b *Bot) handleUnauthorizedUser(c tele.Context) {
 	userID := c.Sender().ID
 	chatID := c.Chat().ID
+	threadID := 0
+	if c.Message() != nil {
+		threadID = c.Message().ThreadID
+	}
 
 	// Check if already pending
 	if b.pendingReqStorage != nil {
 		isPending, _ := b.pendingReqStorage.IsPendingRequest(userID)
 		if isPending {
-			b.sendMessage(chatID, "⏳ Your access request is pending approval. Please wait for an admin to review your request.")
+			b.sendMessage(chatID, "⏳ Your access request is pending approval. Please wait for an admin to review your request.", threadID)
 			return
 		}
 	}
@@ -226,7 +230,7 @@ func (b *Bot) handleUnauthorizedUser(c tele.Context) {
 	btnRequest := menu.Data("📝 Request Access", "request_access")
 	menu.Inline(menu.Row(btnRequest))
 
-	b.sendMessageWithMarkup(chatID, "⛔ *Access Denied*\n\nYou are not authorized to use this bot. Would you like to request access?", menu)
+	b.sendMessageWithMarkup(chatID, "⛔ *Access Denied*\n\nYou are not authorized to use this bot. Would you like to request access?", menu, threadID)
 }
 
 // handleTextMessage handles incoming text messages
@@ -381,16 +385,24 @@ func (b *Bot) handleCallback(c tele.Context) error {
 
 // Helper methods for sending messages
 
-func (b *Bot) sendMessage(chatID int64, text string) error {
-	_, err := b.bot.Send(&tele.Chat{ID: chatID}, text, tele.ModeMarkdown)
+func (b *Bot) sendMessage(chatID int64, text string, threadID ...int) error {
+	opts := []interface{}{tele.ModeMarkdown}
+	if len(threadID) > 0 && threadID[0] != 0 {
+		opts = append(opts, tele.Silent, &tele.SendOptions{ThreadID: threadID[0]})
+	}
+	_, err := b.bot.Send(&tele.Chat{ID: chatID}, text, opts...)
 	if err != nil {
 		log.Printf("Failed to send message: %v", err)
 	}
 	return err
 }
 
-func (b *Bot) sendMessageWithMarkup(chatID int64, text string, markup *tele.ReplyMarkup) error {
-	_, err := b.bot.Send(&tele.Chat{ID: chatID}, text, tele.ModeMarkdown, markup)
+func (b *Bot) sendMessageWithMarkup(chatID int64, text string, markup *tele.ReplyMarkup, threadID ...int) error {
+	opts := []interface{}{tele.ModeMarkdown, markup}
+	if len(threadID) > 0 && threadID[0] != 0 {
+		opts = append(opts, &tele.SendOptions{ThreadID: threadID[0]})
+	}
+	_, err := b.bot.Send(&tele.Chat{ID: chatID}, text, opts...)
 	if err != nil {
 		log.Printf("Failed to send message with markup: %v", err)
 	}
@@ -398,13 +410,10 @@ func (b *Bot) sendMessageWithMarkup(chatID int64, text string, markup *tele.Repl
 }
 
 func (b *Bot) sendMessageToThread(chatID int64, threadID int, text string) error {
-	msg := &tele.Message{
-		Chat: &tele.Chat{ID: chatID},
+	if threadID == 0 {
+		return b.sendMessage(chatID, text)
 	}
-	if threadID != 0 {
-		msg.ThreadID = threadID
-	}
-	_, err := b.bot.Send(msg.Chat, text, tele.ModeMarkdown)
+	_, err := b.bot.Send(&tele.Chat{ID: chatID}, text, tele.ModeMarkdown, &tele.SendOptions{ThreadID: threadID})
 	if err != nil {
 		log.Printf("Failed to send message to thread: %v", err)
 	}
