@@ -1,4 +1,4 @@
-# Cloudflare DNS Management Bot
+# Cloudflare DNS Management MCP + Telegram Bot
 
 A Telegram bot for managing Cloudflare DNS records with **button-based UI** and clean architecture.
 
